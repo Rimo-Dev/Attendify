@@ -1,17 +1,14 @@
 import {
   ArrowRight,
+  Building2,
   CalendarDays,
-  ClockAlert,
   FileMinus,
   FileText,
-  UserCheck,
-  UserPlus,
+  Megaphone,
   Users,
-  UserX,
 } from "lucide-react";
-import { useContext, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AuthContext } from "../contexts/AuthContext";
 import api from "../services/api";
 
 const StatCard = ({ title, value, icon: Icon, color }) => (
@@ -39,25 +36,17 @@ const StatCard = ({ title, value, icon: Icon, color }) => (
     </div>
     <div
       style={{
+        width: "48px",
+        height: "48px",
+        borderRadius: "12px",
+        background: `rgba(${color}, 0.1)`,
+        color: `rgb(${color})`,
         display: "flex",
-        justifyContent: "space-between",
         alignItems: "center",
+        justifyContent: "center",
       }}
     >
-      <div
-        style={{
-          width: "48px",
-          height: "48px",
-          borderRadius: "12px",
-          background: `rgba(${color}, 0.1)`,
-          color: `rgb(${color})`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <Icon size={24} />
-      </div>
+      <Icon size={24} />
     </div>
     <div>
       <h3
@@ -78,42 +67,44 @@ const StatCard = ({ title, value, icon: Icon, color }) => (
   </div>
 );
 
-const AdminDashboard = () => {
-  const { user } = useContext(AuthContext);
+const HRDashboard = () => {
   const navigate = useNavigate();
   const [stats, setStats] = useState(null);
+  const [summary, setSummary] = useState({
+    announcements: 0,
+    pendingLeaves: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [showOnLeave, setShowOnLeave] = useState(false);
   const [onLeaveList, setOnLeaveList] = useState([]);
 
   useEffect(() => {
-    const fetchStats = async () => {
+    const load = async () => {
       try {
-        const res = await api.get("/reports/dashboard");
-        setStats(res.data);
+        const [dashboardRes, leavesRes, announcementsRes] = await Promise.all([
+          api.get("/reports/dashboard"),
+          api.get("/leaves"),
+          api.get("/announcements"),
+        ]);
+
+        setStats(dashboardRes.data);
+        setSummary({
+          announcements: announcementsRes.data.length,
+          pendingLeaves: leavesRes.data.filter(
+            (leave) => leave.status === "Pending",
+          ).length,
+        });
       } catch (error) {
-        console.error("Error fetching stats", error);
+        console.error("Error fetching HR dashboard", error);
       } finally {
         setLoading(false);
       }
     };
-    fetchStats();
+
+    load();
   }, []);
 
   if (loading) return <div>Loading dashboard...</div>;
-
-  const presentPercentage =
-    stats && stats.totalEmployees > 0
-      ? Math.round((stats.presentCount / stats.totalEmployees) * 100)
-      : 0;
-  const absentPercentage =
-    stats && stats.totalEmployees > 0
-      ? Math.round((stats.absentCount / stats.totalEmployees) * 100)
-      : 0;
-  const latePercentage =
-    stats && stats.totalEmployees > 0
-      ? Math.round((stats.lateCount / stats.totalEmployees) * 100)
-      : 0;
 
   return (
     <div className="animate-fade-in" style={{ paddingBottom: "40px" }}>
@@ -128,44 +119,12 @@ const AdminDashboard = () => {
         }}
       >
         <div>
-          <h1
-            style={{
-              fontSize: "2.5rem",
-              marginBottom: "8px",
-              background: "linear-gradient(to right, #ffffff, #a1a1aa)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-            }}
-          >
-            Company Overview
+          <h1 style={{ fontSize: "2.5rem", marginBottom: "8px" }}>
+            HR Overview
           </h1>
           <p style={{ color: "var(--text-muted)", fontSize: "1.1rem" }}>
-            Welcome back, {user.name}. Here's what's happening today.
+            Monitor attendance, leaves, employee records, and announcements.
           </p>
-        </div>
-        <div style={{ display: "flex", gap: "12px" }}>
-          <button
-            onClick={() => navigate("/employees")}
-            className="btn btn-primary"
-            style={{ padding: "10px 18px" }}
-          >
-            <UserPlus size={18} /> Manage Staff
-          </button>
-          <button
-            onClick={async () => {
-              try {
-                const res = await api.get("/leaves/onleave");
-                setOnLeaveList(res.data);
-                setShowOnLeave(true);
-              } catch (e) {
-                console.error("Failed to fetch on-leave list", e);
-              }
-            }}
-            className="btn btn-primary"
-            style={{ padding: "10px 18px" }}
-          >
-            <FileMinus size={18} /> On Leave
-          </button>
         </div>
       </div>
 
@@ -188,179 +147,27 @@ const AdminDashboard = () => {
             <StatCard
               title="Present Today"
               value={stats.presentCount}
-              icon={UserCheck}
+              icon={CalendarDays}
               color="16, 185, 129"
             />
             <StatCard
               title="Late Today"
               value={stats.lateCount}
-              icon={ClockAlert}
+              icon={FileText}
               color="245, 158, 11"
             />
             <StatCard
-              title="Absent Today"
-              value={stats.absentCount}
-              icon={UserX}
+              title="Pending Leaves"
+              value={summary.pendingLeaves}
+              icon={Building2}
               color="244, 63, 94"
             />
           </div>
 
           <div style={{ display: "flex", flexWrap: "wrap", gap: "24px" }}>
-            {/* Attendance Visualizer */}
             <div
               className="glass-panel"
-              style={{
-                flex: "2 1 400px",
-                padding: "32px",
-                display: "flex",
-                flexDirection: "column",
-                justifyContent: "center",
-              }}
-            >
-              <h2 style={{ fontSize: "1.5rem", marginBottom: "32px" }}>
-                Today's Attendance Overview
-              </h2>
-
-              <div
-                style={{
-                  height: "36px",
-                  width: "100%",
-                  borderRadius: "18px",
-                  display: "flex",
-                  overflow: "hidden",
-                  marginBottom: "32px",
-                  background: "rgba(255,255,255,0.05)",
-                  boxShadow: "inset 0 2px 10px rgba(0,0,0,0.2)",
-                }}
-              >
-                {presentPercentage > 0 && (
-                  <div
-                    style={{
-                      width: `${presentPercentage}%`,
-                      background: "var(--success)",
-                      transition: "width 1.5s ease-in-out",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: "0.8rem",
-                      fontWeight: "bold",
-                    }}
-                  >
-                    {presentPercentage > 5 ? `${presentPercentage}%` : ""}
-                  </div>
-                )}
-                {latePercentage > 0 && (
-                  <div
-                    style={{
-                      width: `${latePercentage}%`,
-                      background: "var(--warning)",
-                      transition: "width 1.5s ease-in-out",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: "0.8rem",
-                      fontWeight: "bold",
-                    }}
-                  >
-                    {latePercentage > 5 ? `${latePercentage}%` : ""}
-                  </div>
-                )}
-                {absentPercentage > 0 && (
-                  <div
-                    style={{
-                      width: `${absentPercentage}%`,
-                      background: "var(--danger)",
-                      transition: "width 1.5s ease-in-out",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: "0.8rem",
-                      fontWeight: "bold",
-                    }}
-                  >
-                    {absentPercentage > 5 ? `${absentPercentage}%` : ""}
-                  </div>
-                )}
-              </div>
-
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  flexWrap: "wrap",
-                  gap: "16px",
-                }}
-              >
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: "10px" }}
-                >
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "var(--success)",
-                      boxShadow: "0 0 10px rgba(16, 185, 129, 0.4)",
-                    }}
-                  ></div>
-                  <span
-                    style={{ color: "var(--text-color)", fontWeight: "500" }}
-                  >
-                    Present{" "}
-                    <span style={{ color: "var(--text-muted)" }}>
-                      ({stats.presentCount})
-                    </span>
-                  </span>
-                </div>
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: "10px" }}
-                >
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "var(--warning)",
-                      boxShadow: "0 0 10px rgba(245, 158, 11, 0.4)",
-                    }}
-                  ></div>
-                  <span
-                    style={{ color: "var(--text-color)", fontWeight: "500" }}
-                  >
-                    Late{" "}
-                    <span style={{ color: "var(--text-muted)" }}>
-                      ({stats.lateCount})
-                    </span>
-                  </span>
-                </div>
-                <div
-                  style={{ display: "flex", alignItems: "center", gap: "10px" }}
-                >
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "var(--danger)",
-                      boxShadow: "0 0 10px rgba(244, 63, 94, 0.4)",
-                    }}
-                  ></div>
-                  <span
-                    style={{ color: "var(--text-color)", fontWeight: "500" }}
-                  >
-                    Absent{" "}
-                    <span style={{ color: "var(--text-muted)" }}>
-                      ({stats.absentCount})
-                    </span>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Quick Actions */}
-            <div
-              className="glass-panel"
-              style={{ flex: "1 1 300px", padding: "32px" }}
+              style={{ flex: "1 1 320px", padding: "32px" }}
             >
               <h2 style={{ fontSize: "1.5rem", marginBottom: "24px" }}>
                 Quick Actions
@@ -373,7 +180,7 @@ const AdminDashboard = () => {
                 }}
               >
                 <button
-                  onClick={() => navigate("/attendance")}
+                  onClick={() => navigate("/employees")}
                   className="glass-panel"
                   style={{
                     padding: "20px 16px",
@@ -399,6 +206,55 @@ const AdminDashboard = () => {
                       style={{
                         color: "var(--primary)",
                         background: "rgba(99, 102, 241, 0.1)",
+                        padding: "10px",
+                        borderRadius: "10px",
+                      }}
+                    >
+                      <Users size={20} />
+                    </div>
+                    <span
+                      style={{
+                        fontWeight: "500",
+                        fontSize: "1.05rem",
+                        color: "var(--text-color)",
+                      }}
+                    >
+                      Employee Records
+                    </span>
+                  </div>
+                  <ArrowRight
+                    size={18}
+                    style={{ color: "var(--text-muted)" }}
+                  />
+                </button>
+
+                <button
+                  onClick={() => navigate("/attendance")}
+                  className="glass-panel"
+                  style={{
+                    padding: "20px 16px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    border: "1px solid rgba(255,255,255,0.05)",
+                    background: "rgba(255,255,255,0.02)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    width: "100%",
+                    outline: "none",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "16px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "var(--success)",
+                        background: "rgba(16, 185, 129, 0.1)",
                         padding: "10px",
                         borderRadius: "10px",
                       }}
@@ -461,7 +317,7 @@ const AdminDashboard = () => {
                         color: "var(--text-color)",
                       }}
                     >
-                      Manage Leaves
+                      Review Leave Requests
                     </span>
                   </div>
                   <ArrowRight
@@ -469,6 +325,147 @@ const AdminDashboard = () => {
                     style={{ color: "var(--text-muted)" }}
                   />
                 </button>
+
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await api.get("/leaves/onleave");
+                      setOnLeaveList(res.data);
+                      setShowOnLeave(true);
+                    } catch (e) {
+                      console.error("Failed to fetch on-leave list", e);
+                    }
+                  }}
+                  className="glass-panel"
+                  style={{
+                    padding: "20px 16px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    border: "1px solid rgba(255,255,255,0.05)",
+                    background: "rgba(255,255,255,0.02)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    width: "100%",
+                    outline: "none",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "16px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "var(--danger)",
+                        background: "rgba(244, 63, 94, 0.06)",
+                        padding: "10px",
+                        borderRadius: "10px",
+                      }}
+                    >
+                      <FileMinus size={20} />
+                    </div>
+                    <span
+                      style={{
+                        fontWeight: "500",
+                        fontSize: "1.05rem",
+                        color: "var(--text-color)",
+                      }}
+                    >
+                      On Leave
+                    </span>
+                  </div>
+                  <ArrowRight
+                    size={18}
+                    style={{ color: "var(--text-muted)" }}
+                  />
+                </button>
+
+                <button
+                  onClick={() => navigate("/announcements")}
+                  className="glass-panel"
+                  style={{
+                    padding: "20px 16px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    border: "1px solid rgba(255,255,255,0.05)",
+                    background: "rgba(255,255,255,0.02)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    width: "100%",
+                    outline: "none",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "16px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "#8b5cf6",
+                        background: "rgba(139, 92, 246, 0.1)",
+                        padding: "10px",
+                        borderRadius: "10px",
+                      }}
+                    >
+                      <Megaphone size={20} />
+                    </div>
+                    <span
+                      style={{
+                        fontWeight: "500",
+                        fontSize: "1.05rem",
+                        color: "var(--text-color)",
+                      }}
+                    >
+                      Post Announcements
+                    </span>
+                  </div>
+                  <ArrowRight
+                    size={18}
+                    style={{ color: "var(--text-muted)" }}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <div
+              className="glass-panel"
+              style={{ flex: "1 1 320px", padding: "32px" }}
+            >
+              <h2 style={{ fontSize: "1.5rem", marginBottom: "16px" }}>
+                HR Focus
+              </h2>
+              <p style={{ color: "var(--text-muted)", lineHeight: 1.7 }}>
+                Use this panel to review attendance irregularities, monitor
+                leave approvals, update employee details, and publish internal
+                notices. Employee account creation stays with Admin only.
+              </p>
+              <div
+                style={{
+                  marginTop: "24px",
+                  padding: "16px",
+                  borderRadius: "12px",
+                  background: "rgba(255,255,255,0.04)",
+                }}
+              >
+                <p
+                  style={{
+                    fontSize: "0.9rem",
+                    color: "var(--text-muted)",
+                    marginBottom: "8px",
+                  }}
+                >
+                  Published announcements
+                </p>
+                <p style={{ fontSize: "1.8rem", fontWeight: "bold" }}>
+                  {summary.announcements}
+                </p>
               </div>
             </div>
           </div>
@@ -483,10 +480,11 @@ const AdminDashboard = () => {
           }}
         >
           <p style={{ fontSize: "1.2rem" }}>
-            Unable to load statistics. Please ensure the server is running.
+            Unable to load HR overview. Please ensure the server is running.
           </p>
         </div>
       )}
+
       {showOnLeave && (
         <div
           style={{
@@ -583,4 +581,4 @@ const AdminDashboard = () => {
   );
 };
 
-export default AdminDashboard;
+export default HRDashboard;

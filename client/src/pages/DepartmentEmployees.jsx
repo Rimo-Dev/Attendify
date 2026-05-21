@@ -70,7 +70,7 @@ const DepartmentEmployees = () => {
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
                                 <DollarSign size={16} />
-                                <span>৳ {emp.baseSalary}</span>
+                                <span> ৳{emp.baseSalary}</span>
                             </div>
                         </div>
                     </div>

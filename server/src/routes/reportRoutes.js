@@ -1,9 +1,22 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const { getDashboardStats, getEmployeePerformance } = require('../controllers/reportController');
-const { protect, adminOnly } = require('../middlewares/authMiddleware');
+const {
+  getDashboardStats,
+  getEmployeePerformance,
+} = require("../controllers/reportController");
+const { protect, authorizeRoles } = require("../middlewares/authMiddleware");
 
-router.get('/dashboard', protect, adminOnly, getDashboardStats);
-router.get('/employee/:id', protect, adminOnly, getEmployeePerformance);
+router.get(
+  "/dashboard",
+  protect,
+  authorizeRoles("Admin", "HR"),
+  getDashboardStats,
+);
+router.get(
+  "/employee/:id",
+  protect,
+  authorizeRoles("Admin", "HR"),
+  getEmployeePerformance,
+);
 
 module.exports = router;
