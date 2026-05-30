@@ -3,6 +3,177 @@ const Holiday = require("../models/Holiday");
 const User = require("../models/User");
 const sendEmail = require("../utils/emailSender");
 
+const MONTH_LOOKUP = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11,
+};
+
+const normalizeText = (value) =>
+  String(value || "").replace(/[\u2013\u2014]/g, "-");
+
+const containsHolidayKeywords = (title, content) =>
+  /\b(holiday|company\s+holiday|office\s+closed|closed|off\s+day|company\s+off)\b/i.test(
+    `${title || ""} ${content || ""}`,
+  );
+
+const buildCalendarDate = (dayText, monthText, yearText, fallbackYear) => {
+  const day = Number(dayText);
+  const month = MONTH_LOOKUP[String(monthText || "").toLowerCase()];
+  const year = Number(yearText || fallbackYear);
+
+  if (
+    !Number.isInteger(day) ||
+    month === undefined ||
+    !Number.isInteger(year)
+  ) {
+    return null;
+  }
+
+  const date = new Date(year, month, day);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+
+const expandDateRange = (startDate, endDate) => {
+  const dates = [];
+  const cursor = new Date(startDate);
+
+  while (cursor <= endDate) {
+    const current = new Date(cursor);
+    current.setHours(0, 0, 0, 0);
+    dates.push(current);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return dates;
+};
+
+const extractHolidayDates = (title, content) => {
+  if (!containsHolidayKeywords(title, content)) {
+    return [];
+  }
+
+  const text = normalizeText(`${title || ""} ${content || ""}`);
+  const referenceYear = new Date().getFullYear();
+
+  const namedMonthPatterns = [
+    /(?:from\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)(?:\s+(\d{4}))?\s*(?:-|to)\s*(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)(?:\s+(\d{4}))?/i,
+    /(?:from\s+)?([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(\d{4}))?\s*(?:-|to)\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s+(\d{4}))?/i,
+  ];
+
+  for (const pattern of namedMonthPatterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const startDate =
+      pattern === namedMonthPatterns[0]
+        ? buildCalendarDate(match[1], match[2], match[3], referenceYear)
+        : buildCalendarDate(match[2], match[1], match[3], referenceYear);
+    const endDate =
+      pattern === namedMonthPatterns[0]
+        ? buildCalendarDate(
+            match[4],
+            match[5],
+            match[6] || match[3],
+            referenceYear,
+          )
+        : buildCalendarDate(
+            match[5],
+            match[4],
+            match[6] || match[3],
+            referenceYear,
+          );
+
+    if (startDate && endDate && endDate >= startDate) {
+      return expandDateRange(startDate, endDate);
+    }
+  }
+
+  const numericPattern =
+    /(?:from\s+)?(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\s*(?:-|to)\s*(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?/i;
+  const numericMatch = text.match(numericPattern);
+  if (!numericMatch) {
+    return [];
+  }
+
+  const startDay = Number(numericMatch[1]);
+  const startMonth = Number(numericMatch[2]) - 1;
+  const startYear = Number(numericMatch[3] || referenceYear);
+  const endDay = Number(numericMatch[4]);
+  const endMonth = Number(numericMatch[5]) - 1;
+  const endYear = Number(numericMatch[6] || numericMatch[3] || referenceYear);
+
+  if (
+    !Number.isInteger(startDay) ||
+    !Number.isInteger(startMonth) ||
+    !Number.isInteger(startYear) ||
+    !Number.isInteger(endDay) ||
+    !Number.isInteger(endMonth) ||
+    !Number.isInteger(endYear)
+  ) {
+    return [];
+  }
+
+  const startDate = new Date(startYear, startMonth, startDay);
+  const endDate = new Date(endYear, endMonth, endDay);
+
+  if (
+    Number.isNaN(startDate.getTime()) ||
+    Number.isNaN(endDate.getTime()) ||
+    endDate < startDate
+  ) {
+    return [];
+  }
+
+  startDate.setHours(0, 0, 0, 0);
+  endDate.setHours(0, 0, 0, 0);
+  return expandDateRange(startDate, endDate);
+};
+
+const syncHolidayDatesForAnnouncement = async (
+  announcementId,
+  title,
+  content,
+) => {
+  await Holiday.deleteMany({ sourceAnnouncementId: announcementId });
+
+  const holidayDates = extractHolidayDates(title, content);
+  if (holidayDates.length === 0) {
+    return [];
+  }
+
+  const docs = holidayDates.map((date) => ({
+    title: `Company Holiday: ${date.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "long",
+      year: "numeric",
+    })}`,
+    date,
+    type: "Company",
+    sourceAnnouncementId: announcementId,
+    isRecurringAnnual: false,
+    isActive: true,
+  }));
+
+  return Holiday.insertMany(docs, { ordered: false });
+};
+
 const escapeHtml = (s) => {
   if (s == null) return "";
   return String(s)
@@ -28,71 +199,15 @@ const getAnnouncements = async (req, res) => {
 
 // @desc    Create an announcement
 // @route   POST /api/announcements
-// @access  Private/Admin or HR (with restrictions)
+// @access  Private/Admin
 const createAnnouncement = async (req, res) => {
   try {
-    const {
-      title,
-      content,
-      category,
-      isHoliday,
-      holidayDate,
-      holidayStartDate,
-      holidayEndDate,
-      holidayName,
-    } = req.body;
-
-    if (!title || !content) {
-      return res
-        .status(400)
-        .json({ message: "Title and content are required" });
-    }
-
-    // normalize holiday date(s) if provided
-    let normalizedHolidayDate = null;
-    let normalizedHolidayStart = null;
-    let normalizedHolidayEnd = null;
-
-    if (isHoliday) {
-      try {
-        if (holidayStartDate) {
-          normalizedHolidayStart = new Date(holidayStartDate);
-          normalizedHolidayStart.setHours(0, 0, 0, 0);
-        }
-        if (holidayEndDate) {
-          normalizedHolidayEnd = new Date(holidayEndDate);
-          normalizedHolidayEnd.setHours(0, 0, 0, 0);
-        }
-        if (!normalizedHolidayStart && holidayDate) {
-          normalizedHolidayDate = new Date(holidayDate);
-          normalizedHolidayDate.setHours(0, 0, 0, 0);
-        }
-
-        // Allow one-day holidays when only one endpoint is provided.
-        if (normalizedHolidayStart && !normalizedHolidayEnd) {
-          normalizedHolidayEnd = new Date(normalizedHolidayStart);
-        }
-        if (!normalizedHolidayStart && normalizedHolidayEnd) {
-          normalizedHolidayStart = new Date(normalizedHolidayEnd);
-        }
-      } catch (e) {
-        normalizedHolidayDate =
-          normalizedHolidayStart =
-          normalizedHolidayEnd =
-            null;
-      }
-    }
+    const { title, content } = req.body;
 
     const announcement = await Announcement.create({
       title,
       content,
-      category: category || (req.user.role === "HR" ? "HR" : "Company"),
       createdBy: req.user._id,
-      isHoliday: !!isHoliday,
-      holidayDate: normalizedHolidayDate,
-      holidayStartDate: normalizedHolidayStart,
-      holidayEndDate: normalizedHolidayEnd,
-      holidayName: holidayName || (isHoliday ? title : undefined),
     });
 
     const populatedAnnouncement = await announcement.populate(
@@ -101,6 +216,7 @@ const createAnnouncement = async (req, res) => {
     );
 
     /** Shown in API response so admins can see SMTP status without reading server logs only */
+    await syncHolidayDatesForAnnouncement(announcement._id, title, content);
     let emailNotice = { sent: false, reason: "dispatch_not_run" };
 
     // Send announcement email to all active employees (non-blocking on errors)
@@ -203,60 +319,6 @@ const createAnnouncement = async (req, res) => {
       };
     }
 
-    // If this announcement represents a holiday, ensure Holiday documents exist for each date in the range
-    if (announcement.isHoliday) {
-      try {
-        // Determine range: prefer explicit start/end, fallback to single holidayDate
-        let start =
-          announcement.holidayStartDate || announcement.holidayDate || null;
-        let end =
-          announcement.holidayEndDate || announcement.holidayDate || null;
-
-        if (start && end) {
-          // Ensure Date objects
-          start = new Date(start);
-          end = new Date(end);
-          start.setHours(0, 0, 0, 0);
-          end.setHours(0, 0, 0, 0);
-
-          // Swap if out-of-order
-          if (start > end) {
-            const tmp = start;
-            start = end;
-            end = tmp;
-          }
-
-          for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
-            const day = new Date(d);
-            day.setHours(0, 0, 0, 0);
-            try {
-              await Holiday.findOneAndUpdate(
-                { date: day },
-                {
-                  name: announcement.holidayName || announcement.title,
-                  date: day,
-                  description: announcement.content || "",
-                  sourceAnnouncement: announcement._id,
-                },
-                { upsert: true, new: true, setDefaultsOnInsert: true },
-              );
-            } catch (innerErr) {
-              console.error(
-                "Failed to upsert holiday for date",
-                day,
-                innerErr?.message || innerErr,
-              );
-            }
-          }
-        }
-      } catch (holErr) {
-        console.error(
-          "Failed to create linked Holiday(s) for announcement:",
-          holErr?.message || holErr,
-        );
-      }
-    }
-
     const payload =
       typeof populatedAnnouncement.toObject === "function"
         ? populatedAnnouncement.toObject()
@@ -275,18 +337,40 @@ const deleteAnnouncement = async (req, res) => {
     const announcement = await Announcement.findById(req.params.id);
 
     if (announcement) {
-      // If this announcement created a holiday, remove that holiday entry
-      try {
-        await Holiday.deleteMany({ sourceAnnouncement: announcement._id });
-      } catch (holDelErr) {
-        console.error(
-          "Failed to delete linked Holiday(s):",
-          holDelErr?.message || holDelErr,
-        );
-      }
-
+      await Holiday.deleteMany({ sourceAnnouncementId: announcement._id });
       await Announcement.deleteOne({ _id: announcement._id });
       res.json({ message: "Announcement removed" });
+    } else {
+      res.status(404).json({ message: "Announcement not found" });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Update an announcement
+// @route   PUT /api/announcements/:id
+// @access  Private/Admin
+const updateAnnouncement = async (req, res) => {
+  try {
+    const { title, content } = req.body;
+    const announcement = await Announcement.findById(req.params.id);
+
+    if (announcement) {
+      announcement.title = title || announcement.title;
+      announcement.content = content || announcement.content;
+
+      const updatedAnnouncement = await announcement.save();
+      await syncHolidayDatesForAnnouncement(
+        updatedAnnouncement._id,
+        updatedAnnouncement.title,
+        updatedAnnouncement.content,
+      );
+      const populatedAnnouncement = await updatedAnnouncement.populate(
+        "createdBy",
+        "name role",
+      );
+      res.json(populatedAnnouncement);
     } else {
       res.status(404).json({ message: "Announcement not found" });
     }
@@ -298,5 +382,6 @@ const deleteAnnouncement = async (req, res) => {
 module.exports = {
   getAnnouncements,
   createAnnouncement,
+  updateAnnouncement,
   deleteAnnouncement,
 };

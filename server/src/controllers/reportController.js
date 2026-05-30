@@ -1,83 +1,141 @@
 const User = require("../models/User");
 const Attendance = require("../models/Attendance");
 const Leave = require("../models/Leave");
+const {
+  toDateOnly,
+  getMonthStart,
+  getMonthEnd,
+  getHolidaySetForMonth,
+  isWorkingDay,
+  countWorkingDays,
+} = require("../utils/workingDays");
 
 // @desc    Get Admin Dashboard Stats
 // @route   GET /api/reports/dashboard
 // @access  Private/Admin
 const getDashboardStats = async (req, res) => {
   try {
-    // Count Employee and HR users as staff for attendance
-    const employeeCount = await User.countDocuments({ role: "Employee" });
-    const hrCount = await User.countDocuments({ role: "HR" });
-    const totalEmployees = employeeCount + hrCount; // kept the same response key for UI compatibility
+    const totalEmployees = await User.countDocuments({ role: "Employee" });
 
-    // Calculate today range (start of today to start of tomorrow)
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const startOfTomorrow = new Date(startOfToday);
-    startOfTomorrow.setDate(startOfTomorrow.getDate() + 1);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    // Get staff IDs to restrict attendance counting to Employee + HR only
-    const staffUsers = await User.find({
-      role: { $in: ["Employee", "HR"] },
-    }).select("_id");
-    const staffIds = staffUsers.map((u) => u._id);
+    const endOfToday = new Date();
+    endOfToday.setHours(23, 59, 59, 999);
 
-    // Fetch attendances strictly within today for staff only
-    const attendancesToday = await Attendance.find({
-      date: { $gte: startOfToday, $lt: startOfTomorrow },
-      employeeId: { $in: staffIds },
-    });
+    const startOfMonth = getMonthStart(today);
+    const endOfMonth = getMonthEnd(today);
+    const holidaySet = await getHolidaySetForMonth(startOfMonth, endOfMonth);
 
-    // Use sets to count unique employees who checked in today
-    const presentSet = new Set();
-    const lateSet = new Set();
+    // If today is not a working day (weekend or company holiday), there are no absentees
+    if (!isWorkingDay(today, holidaySet)) {
+      const attendancesToday = await Attendance.find({
+        date: { $gte: today, $lte: endOfToday },
+      });
+      let presentCount = 0;
+      let lateCount = 0;
 
-    attendancesToday.forEach((att) => {
-      const empId = String(
-        att.employeeId || att.employee || att.employee_id || "",
-      );
-      if (!empId) return;
-      if (att.status === "Present" || att.status === "Late") {
-        presentSet.add(empId);
-      }
-      if (att.status === "Late") {
-        lateSet.add(empId);
-      }
-    });
+      attendancesToday.forEach((att) => {
+        if (att.status === "Present") presentCount++;
+        if (att.status === "Late") {
+          presentCount++; // Late is still present
+          lateCount++;
+        }
+      });
 
-    const presentCount = presentSet.size;
-    const lateCount = lateSet.size;
+      const leavesToday = await Leave.find({
+        status: "Approved",
+        startDate: { $lte: endOfToday },
+        endDate: { $gte: today },
+      }).populate("employeeId", "name email department");
 
-    // Determine approved leaves overlapping today for staff (so we don't mark them absent)
+      const onLeaveEmployees = leavesToday
+        .filter((l) => l.employeeId)
+        .map((l) => ({
+          id: l.employeeId._id,
+          name: l.employeeId.name,
+          department: l.employeeId.department,
+          type: l.type,
+        }));
+
+      const onLeaveCount = onLeaveEmployees.length;
+
+      return res.json({
+        totalEmployees,
+        presentCount,
+        absentCount: 0,
+        lateCount,
+        onLeaveCount,
+        onLeaveEmployees,
+      });
+    }
+
+    // For working days, compute absent employees precisely:
+    // Absent = employees who are not on approved leave AND have no check-in/check-out record today
+    const employees = await User.find({ role: "Employee" }).select(
+      "_id name department",
+    );
+
     const leavesToday = await Leave.find({
       status: "Approved",
-      startDate: { $lt: startOfTomorrow },
-      endDate: { $gte: startOfToday },
-      employeeId: { $in: staffIds },
-    }).select("employeeId");
+      startDate: { $lte: endOfToday },
+      endDate: { $gte: today },
+    }).populate("employeeId", "_id name department");
 
     const onLeaveSet = new Set(
-      leavesToday.map((l) => String(l.employeeId && l.employeeId.toString())),
+      leavesToday
+        .filter((l) => l.employeeId)
+        .map((l) => String(l.employeeId._id)),
     );
 
-    // Exclude on-leave staff who are not present from the absent count
-    let onLeaveNotPresentCount = 0;
-    onLeaveSet.forEach((id) => {
-      if (!presentSet.has(id)) onLeaveNotPresentCount += 1;
+    const attendancesToday = await Attendance.find({
+      date: { $gte: today, $lte: endOfToday },
     });
 
-    const absentCount = Math.max(
-      0,
-      totalEmployees - presentCount - onLeaveNotPresentCount,
+    // Consider an employee present if there's any checkIn or checkOut record for today
+    const presentSet = new Set(
+      attendancesToday
+        .filter((a) => a.checkIn || a.checkOut)
+        .map((a) => String(a.employeeId)),
     );
+
+    let presentCount = 0;
+    let lateCount = 0;
+
+    attendancesToday.forEach((att) => {
+      if (att.status === "Present") presentCount++;
+      if (att.status === "Late") {
+        presentCount++; // Late is still present
+        lateCount++;
+      }
+    });
+
+    const onLeaveEmployees = leavesToday
+      .filter((l) => l.employeeId)
+      .map((l) => ({
+        id: l.employeeId._id,
+        name: l.employeeId.name,
+        department: l.employeeId.department,
+        type: l.type,
+      }));
+
+    const onLeaveCount = onLeaveEmployees.length;
+
+    let absentCount = 0;
+    for (const emp of employees) {
+      const idStr = String(emp._id);
+      if (onLeaveSet.has(idStr)) continue;
+      if (presentSet.has(idStr)) continue;
+      absentCount++;
+    }
 
     res.json({
       totalEmployees,
       presentCount,
       absentCount,
       lateCount,
+      onLeaveCount,
+      onLeaveEmployees,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -95,13 +153,15 @@ const getEmployeePerformance = async (req, res) => {
     if (!employee)
       return res.status(404).json({ message: "Employee not found" });
 
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
+    const now = new Date();
+    const today = toDateOnly(now);
+    const startOfMonth = getMonthStart(today);
+    const endOfMonth = getMonthEnd(today);
+    const holidaySet = await getHolidaySetForMonth(startOfMonth, endOfMonth);
 
     const attendances = await Attendance.find({
       employeeId,
-      date: { $gte: startOfMonth },
+      date: { $gte: startOfMonth, $lte: endOfMonth },
     });
 
     let presentDays = 0;
@@ -109,6 +169,12 @@ const getEmployeePerformance = async (req, res) => {
     let totalLateMinutes = 0;
 
     attendances.forEach((att) => {
+      const attendanceDate = toDateOnly(att.date);
+
+      if (!isWorkingDay(attendanceDate, holidaySet)) {
+        return;
+      }
+
       if (att.status === "Present" || att.status === "Late") presentDays++;
       if (att.status === "Late") {
         lateDays++;
@@ -116,15 +182,51 @@ const getEmployeePerformance = async (req, res) => {
       }
     });
 
-    const today = new Date();
-    let daysPassed = today.getDate();
-    let workingDaysPassed = 0;
-    for (let i = 1; i <= daysPassed; i++) {
-      const d = new Date(today.getFullYear(), today.getMonth(), i);
-      if (d.getDay() !== 0 && d.getDay() !== 6) workingDaysPassed++;
+    const joinDate = employee.joiningDate || employee.createdAt;
+    const joinStart = toDateOnly(joinDate);
+    const eligibleStart = joinStart > startOfMonth ? joinStart : startOfMonth;
+
+    const totalWorkingDaysInMonth = Math.max(
+      1,
+      countWorkingDays(startOfMonth, endOfMonth, holidaySet),
+    );
+
+    const workingDaysPassed = countWorkingDays(
+      eligibleStart,
+      today,
+      holidaySet,
+    );
+
+    const approvedLeaves = await Leave.find({
+      employeeId,
+      status: "Approved",
+      $or: [{ startDate: { $lte: today }, endDate: { $gte: startOfMonth } }],
+    });
+
+    let leaveDaysPassed = 0;
+    const cursor = new Date(eligibleStart);
+    while (cursor <= today) {
+      const current = toDateOnly(cursor);
+
+      if (isWorkingDay(current, holidaySet)) {
+        // Check if on approved leave
+        for (const leave of approvedLeaves) {
+          const ls = toDateOnly(leave.startDate);
+          const le = toDateOnly(leave.endDate);
+          if (current >= ls && current <= le) {
+            leaveDaysPassed++;
+            break;
+          }
+        }
+      }
+
+      cursor.setDate(cursor.getDate() + 1);
     }
 
-    const absentDays = Math.max(0, workingDaysPassed - presentDays);
+    const absentDays = Math.max(
+      0,
+      workingDaysPassed - presentDays - leaveDaysPassed,
+    );
 
     let score = 100;
     score -= absentDays * 10;
@@ -148,6 +250,8 @@ const getEmployeePerformance = async (req, res) => {
       presentDays,
       lateDays,
       absentDays,
+      workingDaysPassed,
+      workingDaysInMonth: totalWorkingDaysInMonth,
       totalLateMinutes,
       score: Math.max(0, score),
       rating,

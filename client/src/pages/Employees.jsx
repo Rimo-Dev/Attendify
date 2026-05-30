@@ -1,6 +1,8 @@
-import { CalendarDays, Edit2, Plus, Trash2, TrendingUp, X } from "lucide-react";
-import { useContext, useEffect, useRef, useState } from "react";
+import { format } from "date-fns";
+import { Edit2, FileText, Plus, Trash2, TrendingUp, X } from "lucide-react";
+import { useContext, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import { AuthContext } from "../contexts/AuthContext";
 import api from "../services/api";
 
@@ -9,6 +11,7 @@ const Employees = () => {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [originalJoiningDate, setOriginalJoiningDate] = useState("");
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -18,55 +21,40 @@ const Employees = () => {
     shiftStartTime: "09:00",
     shiftEndTime: "17:00",
     department: "",
+    joiningDate: format(new Date(), "yyyy-MM-dd"),
   });
   const [performanceData, setPerformanceData] = useState(null);
+  const [loadingPerformance, setLoadingPerformance] = useState(false);
   const { user } = useContext(AuthContext);
-  const isAdmin = user?.role === "Admin";
-  const canManageEmployees = user?.role === "Admin" || user?.role === "HR";
-
-  const [departmentsList, setDepartmentsList] = useState([]);
-  const [selectedDate, setSelectedDate] = useState("");
-  const [attendanceForDate, setAttendanceForDate] = useState([]);
-  const dateInputRef = useRef(null);
-  const [showDateModal, setShowDateModal] = useState(false);
-  useEffect(() => {
-    const fetchDepartments = async () => {
-      try {
-        const res = await api.get("/departments");
-        setDepartmentsList(res.data.map((d) => d.name));
-      } catch (e) {
-        // ignore and fallback to computed options
-      }
-    };
-    fetchDepartments();
-  }, []);
+  const navigate = useNavigate();
 
   const existingDepartments = Array.from(
-    new Set(
-      employees
-        .map((emp) => emp.department)
-        .filter((d) => d && d !== "HR" && d !== "Admin"),
-    ),
+    new Set(employees.map((emp) => emp.department).filter((d) => d)),
   );
   const standardDepartments = [
     "IT",
+    "HR",
     "Sales",
     "Marketing",
     "Finance",
     "Operations",
     "Engineering",
     "Support",
-    "Admin",
   ];
-  // Ensure HR and Admin are not offered as department assignments
   const departmentOptions = Array.from(
-    new Set([
-      ...(departmentsList.length
-        ? departmentsList
-        : standardDepartments.filter((s) => s !== "HR" && s !== "Admin")),
-      ...existingDepartments,
-    ]),
+    new Set([...standardDepartments, ...existingDepartments]),
   ).sort();
+  const today = new Date();
+  const minJoiningDate = format(today, "yyyy-MM-dd");
+  const maxJoiningDate = format(
+    new Date(today.getFullYear(), 11, 31),
+    "yyyy-MM-dd",
+  );
+
+  const isJoiningDateAllowed = (value) => {
+    if (!value) return false;
+    return value >= minJoiningDate && value <= maxJoiningDate;
+  };
 
   const fetchEmployees = async () => {
     try {
@@ -80,29 +68,23 @@ const Employees = () => {
   };
 
   useEffect(() => {
-    const load = async () => {
-      await fetchEmployees();
-    };
-    load();
+    fetchEmployees();
   }, []);
-
-  const fetchAttendanceForDate = async (date) => {
-    if (!date) {
-      setAttendanceForDate([]);
-      return;
-    }
-    try {
-      const res = await api.get(`/attendance?date=${date}`);
-      setAttendanceForDate(res.data || []);
-    } catch (e) {
-      console.error("Failed to fetch attendance for date", e);
-      setAttendanceForDate([]);
-    }
-  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
+      const joiningDateChanged = formData.joiningDate !== originalJoiningDate;
+
+      if (!editingId || joiningDateChanged) {
+        if (!isJoiningDateAllowed(formData.joiningDate)) {
+          alert(
+            "Joining date must be from today through the end of the current year.",
+          );
+          return;
+        }
+      }
+
       if (editingId) {
         await api.put(`/employees/${editingId}`, formData);
       } else {
@@ -110,6 +92,7 @@ const Employees = () => {
       }
       setShowModal(false);
       setEditingId(null);
+      setOriginalJoiningDate("");
       setFormData({
         name: "",
         email: "",
@@ -119,6 +102,7 @@ const Employees = () => {
         shiftStartTime: "09:00",
         shiftEndTime: "17:00",
         department: "",
+        joiningDate: format(new Date(), "yyyy-MM-dd"),
       });
       fetchEmployees();
     } catch (error) {
@@ -136,7 +120,15 @@ const Employees = () => {
       shiftStartTime: emp.shiftStartTime,
       shiftEndTime: emp.shiftEndTime,
       department: emp.department || "",
+      joiningDate: emp.joiningDate
+        ? format(new Date(emp.joiningDate), "yyyy-MM-dd")
+        : format(new Date(emp.createdAt), "yyyy-MM-dd"),
     });
+    setOriginalJoiningDate(
+      emp.joiningDate
+        ? format(new Date(emp.joiningDate), "yyyy-MM-dd")
+        : format(new Date(emp.createdAt), "yyyy-MM-dd"),
+    );
     setEditingId(emp._id);
     setShowModal(true);
   };
@@ -146,26 +138,25 @@ const Employees = () => {
       try {
         await api.delete(`/employees/${id}`);
         fetchEmployees();
-      } catch {
+      } catch (error) {
         alert("Failed to delete");
       }
     }
   };
 
   const handleViewPerformance = async (empId) => {
+    setLoadingPerformance(true);
     setPerformanceData({ loading: true });
     try {
       const res = await api.get(`/reports/employee/${empId}`);
       setPerformanceData(res.data);
-    } catch {
+    } catch (error) {
       alert("Failed to load performance data");
       setPerformanceData(null);
+    } finally {
+      setLoadingPerformance(false);
     }
   };
-
-  // Date modal handlers
-  const openDateModal = () => setShowDateModal(true);
-  const closeDateModal = () => setShowDateModal(false);
 
   if (loading) return <div>Loading employees...</div>;
 
@@ -185,10 +176,11 @@ const Employees = () => {
             Manage your organization's staff
           </p>
         </div>
-        {canManageEmployees && (
+        {user?.role === "Admin" && (
           <button
             onClick={() => {
               setEditingId(null);
+              setOriginalJoiningDate("");
               setFormData({
                 name: "",
                 email: "",
@@ -198,36 +190,15 @@ const Employees = () => {
                 shiftStartTime: "09:00",
                 shiftEndTime: "17:00",
                 department: "",
+                joiningDate: format(new Date(), "yyyy-MM-dd"),
               });
               setShowModal(true);
             }}
             className="btn btn-primary"
           >
-            <Plus size={20} /> {isAdmin ? "Add Employee / HR" : "Add Employee"}
+            <Plus size={20} /> Add Employee
           </button>
         )}
-        {/* Date filter for employee attendance details */}
-        <div
-          style={{
-            marginLeft: 12,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          <button
-            onClick={() => setShowDateModal(true)}
-            className="btn"
-            style={{
-              marginLeft: 12,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <CalendarDays /> Filter by Date
-          </button>
-        </div>
       </div>
 
       <div className="glass-panel table-container" style={{ padding: "24px" }}>
@@ -240,6 +211,7 @@ const Employees = () => {
               <th>Role</th>
               <th>Base Salary</th>
               <th>Shift</th>
+              <th>Joined On</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -252,56 +224,69 @@ const Employees = () => {
                 <td>
                   <span className="badge badge-Present">{emp.role}</span>
                 </td>
-                <td> ৳{emp.baseSalary}</td>
+                <td>৳ {emp.baseSalary}</td>
                 <td>
                   {emp.shiftStartTime} - {emp.shiftEndTime}
                 </td>
                 <td>
-                  {canManageEmployees && emp.role !== "Admin" && (
-                    <div style={{ display: "flex", gap: "8px" }}>
-                      <button
-                        onClick={() => handleViewPerformance(emp._id)}
-                        style={{
-                          background: "none",
-                          border: "none",
-                          color: "var(--success)",
-                          cursor: "pointer",
-                        }}
-                        title="View Performance"
-                      >
-                        <TrendingUp size={18} />
-                      </button>
-                      {/* Edit/Delete: Admin or HR can manage non-Admin users */}
-                      {canManageEmployees && emp.role !== "Admin" && (
-                        <>
-                          <button
-                            onClick={() => handleEdit(emp)}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              color: "var(--primary)",
-                              cursor: "pointer",
-                            }}
-                            title="Edit Employee"
-                          >
-                            <Edit2 size={18} />
-                          </button>
-                          <button
-                            onClick={() => handleDelete(emp._id)}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              color: "var(--danger)",
-                              cursor: "pointer",
-                            }}
-                            title="Delete Employee"
-                          >
-                            <Trash2 size={18} />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  )}
+                  {emp.joiningDate
+                    ? format(new Date(emp.joiningDate), "MMM dd, yyyy")
+                    : format(new Date(emp.createdAt), "MMM dd, yyyy")}
+                </td>
+                <td>
+                  {(user?.role === "Admin" || user?.role === "HR") &&
+                    emp.role !== "Admin" && (
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <button
+                          onClick={() => navigate(`/salary/${emp._id}`)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--warning)",
+                            cursor: "pointer",
+                          }}
+                          title="View Payslip"
+                        >
+                          <FileText size={18} />
+                        </button>
+                        <button
+                          onClick={() => handleViewPerformance(emp._id)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--success)",
+                            cursor: "pointer",
+                          }}
+                          title="View Performance"
+                        >
+                          <TrendingUp size={18} />
+                        </button>
+                        <button
+                          onClick={() => handleEdit(emp)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--primary)",
+                            cursor: "pointer",
+                          }}
+                          title="Edit Employee"
+                        >
+                          <Edit2 size={18} />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(emp._id)}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--danger)",
+                            cursor: "pointer",
+                          }}
+                          title="Delete Employee"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    )}
                 </td>
               </tr>
             ))}
@@ -388,30 +373,41 @@ const Employees = () => {
                     gap: "16px",
                   }}
                 >
-                  {isAdmin && (
-                    <div>
-                      <label
-                        style={{
-                          fontSize: "0.85rem",
-                          color: "var(--text-muted)",
-                          marginBottom: "8px",
-                          display: "block",
-                        }}
-                      >
-                        Role
-                      </label>
-                      <select
-                        className="input-field"
-                        value={formData.role}
-                        onChange={(e) =>
-                          setFormData({ ...formData, role: e.target.value })
-                        }
-                      >
-                        <option value="Employee">Employee</option>
-                        <option value="HR">HR</option>
-                      </select>
-                    </div>
-                  )}
+                  <div>
+                    <label
+                      style={{
+                        fontSize: "0.85rem",
+                        color: "var(--text-muted)",
+                        marginBottom: "8px",
+                        display: "block",
+                      }}
+                    >
+                      Role
+                    </label>
+                    <select
+                      className="input-field"
+                      value={formData.role}
+                      onChange={(e) => {
+                        const newRole = e.target.value;
+                        setFormData((prev) => ({
+                          ...prev,
+                          role: newRole,
+                          department:
+                            newRole === "HR"
+                              ? "HR"
+                              : newRole === "Admin"
+                                ? ""
+                                : prev.department,
+                        }));
+                      }}
+                    >
+                      <option value="Employee">Employee</option>
+                      <option value="HR">HR</option>
+                      {user?.role === "Admin" && (
+                        <option value="Admin">Admin</option>
+                      )}
+                    </select>
+                  </div>
                   <div>
                     <label
                       style={{
@@ -429,6 +425,19 @@ const Employees = () => {
                       onChange={(e) =>
                         setFormData({ ...formData, department: e.target.value })
                       }
+                      disabled={
+                        formData.role === "HR" || formData.role === "Admin"
+                      }
+                      style={{
+                        opacity:
+                          formData.role === "HR" || formData.role === "Admin"
+                            ? 0.6
+                            : 1,
+                        cursor:
+                          formData.role === "HR" || formData.role === "Admin"
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
                     >
                       <option value="">Unassigned</option>
                       {departmentOptions.map((dept) => (
@@ -465,6 +474,35 @@ const Employees = () => {
                       value={formData.baseSalary}
                       onChange={(e) =>
                         setFormData({ ...formData, baseSalary: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label
+                      style={{
+                        fontSize: "0.85rem",
+                        color: "var(--text-muted)",
+                        marginBottom: "8px",
+                        display: "block",
+                      }}
+                    >
+                      Joined On
+                    </label>
+                    <input
+                      type="date"
+                      className="input-field"
+                      required
+                      value={formData.joiningDate}
+                      min={editingId ? undefined : minJoiningDate}
+                      max={editingId ? undefined : maxJoiningDate}
+                      onClick={(e) =>
+                        e.target.showPicker && e.target.showPicker()
+                      }
+                      onChange={(e) =>
+                        setFormData({
+                          ...formData,
+                          joiningDate: e.target.value,
+                        })
                       }
                     />
                   </div>
@@ -556,144 +594,6 @@ const Employees = () => {
           document.body,
         )}
 
-      {showDateModal &&
-        createPortal(
-          <div
-            style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: "rgba(0,0,0,0.6)",
-              zIndex: 1000,
-              display: "flex",
-              justifyContent: "center",
-              alignItems: "center",
-            }}
-          >
-            <div
-              className="glass-panel animate-fade-in"
-              style={{
-                padding: "24px",
-                width: "100%",
-                maxWidth: "600px",
-                position: "relative",
-              }}
-            >
-              <button
-                onClick={() => closeDateModal()}
-                style={{
-                  position: "absolute",
-                  right: "16px",
-                  top: "16px",
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                Close
-              </button>
-              <h2 style={{ marginBottom: 12 }}>Filter Attendance by Date</h2>
-              <div
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  marginBottom: 16,
-                  alignItems: "center",
-                }}
-              >
-                <div
-                  style={{
-                    position: "relative",
-                    display: "inline-flex",
-                    alignItems: "center",
-                  }}
-                >
-                  <CalendarDays
-                    style={{
-                      position: "absolute",
-                      left: 10,
-                      color: "var(--text-muted)",
-                    }}
-                  />
-                  <input
-                    ref={dateInputRef}
-                    type="date"
-                    className="input-field"
-                    value={selectedDate}
-                    onChange={(e) => setSelectedDate(e.target.value)}
-                    style={{ height: 40, paddingLeft: 36 }}
-                  />
-                </div>
-                <button
-                  className="btn btn-primary"
-                  onClick={async () => {
-                    await fetchAttendanceForDate(selectedDate);
-                  }}
-                >
-                  Search
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setSelectedDate("");
-                    setAttendanceForDate([]);
-                  }}
-                >
-                  Clear
-                </button>
-              </div>
-              <div>
-                {attendanceForDate.length === 0 ? (
-                  <div style={{ color: "var(--text-muted)" }}>No records</div>
-                ) : (
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr>
-                        <th style={{ textAlign: "left", padding: 8 }}>
-                          Employee
-                        </th>
-                        <th style={{ textAlign: "left", padding: 8 }}>
-                          Check In
-                        </th>
-                        <th style={{ textAlign: "left", padding: 8 }}>
-                          Check Out
-                        </th>
-                        <th style={{ textAlign: "left", padding: 8 }}>
-                          Status
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {attendanceForDate.map((a) => (
-                        <tr key={a._id}>
-                          <td style={{ padding: 8 }}>
-                            {a.employeeId?.name || "Unknown"}
-                          </td>
-                          <td style={{ padding: 8 }}>
-                            {a.checkIn
-                              ? new Date(a.checkIn).toLocaleTimeString()
-                              : "--"}
-                          </td>
-                          <td style={{ padding: 8 }}>
-                            {a.checkOut
-                              ? new Date(a.checkOut).toLocaleTimeString()
-                              : "--"}
-                          </td>
-                          <td style={{ padding: 8 }}>{a.status}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
-
       {/* Performance Modal */}
       {performanceData &&
         createPortal(
@@ -742,7 +642,7 @@ const Employees = () => {
               ) : (
                 <>
                   <h2 style={{ marginBottom: "8px", fontSize: "1.8rem" }}>
-                    Attendance Record
+                    Attendance Report
                   </h2>
                   <p
                     style={{ color: "var(--text-muted)", marginBottom: "32px" }}

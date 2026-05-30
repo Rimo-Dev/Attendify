@@ -1,387 +1,296 @@
-const Leave = require("../models/Leave");
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-const getPeriodRange = (type, referenceDate = new Date()) => {
-  const start = new Date(referenceDate);
-  const end = new Date(referenceDate);
-
-  if (type === "Casual" || type === "Sick") {
-    start.setDate(1);
-    start.setHours(0, 0, 0, 0);
-    end.setMonth(end.getMonth() + 1, 0);
-    end.setHours(23, 59, 59, 999);
-    return { start, end };
-  }
-
-  start.setFullYear(referenceDate.getFullYear(), 0, 1);
-  start.setHours(0, 0, 0, 0);
-  end.setFullYear(referenceDate.getFullYear(), 11, 31);
-  end.setHours(23, 59, 59, 999);
-  return { start, end };
-};
-
-const getLeaveLimit = (type) => {
-  if (type === "Casual") return 1;
-  if (type === "Sick") return 2;
-  if (type === "Annual") return 1.5;
-  return null;
-};
-
-const getLeaveLimitWindowLabel = (type) => {
-  if (type === "Casual") return "per month";
-  if (type === "Sick") return "per month";
-  if (type === "Annual") return "per year";
-  return "";
-};
-
-const normalizeDate = (value) => {
-  const date = new Date(value);
-  date.setHours(0, 0, 0, 0);
-  return date;
-};
-
-const getRequestedLeaveDays = ({ startDate, endDate, days }) => {
-  const parsedDays = Number(days);
-  if (Number.isFinite(parsedDays) && parsedDays > 0) {
-    return parsedDays;
-  }
-
-  const start = normalizeDate(startDate);
-  const end = normalizeDate(endDate);
-  return Math.max(1, Math.round((end - start) / DAY_MS + 1));
-};
-
-const getEffectiveReferenceDate = (type, startDate, endDate) => {
-  if (type === "Sick") {
-    return normalizeDate(endDate || startDate || Date.now());
-  }
-  return normalizeDate(startDate || Date.now());
-};
+const Leave = require('../models/Leave');
 
 // @desc    Apply for leave
 // @route   POST /api/leaves
 // @access  Private
 const applyLeave = async (req, res) => {
-  try {
-    const { startDate, endDate, type, reason, days } = req.body;
+    try {
+        const { startDate, endDate, type, reason } = req.body;
+        const startDateObj = new Date(startDate);
+        const endDateObj = new Date(endDate);
+        
+        // Calculate days requested
+        const timeDiff = endDateObj.getTime() - startDateObj.getTime();
+        const daysRequested = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
+        
+        if (daysRequested <= 0) {
+            return res.status(400).json({ message: 'End date must be after start date' });
+        }
 
-    if (!startDate || !endDate || !type || !reason) {
-      return res.status(400).json({ message: "All leave fields are required" });
-    }
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
 
-    const requestedDays = getRequestedLeaveDays({ startDate, endDate, days });
-    const today = normalizeDate(Date.now());
-    const leaveStart = normalizeDate(startDate);
-    const leaveEnd = normalizeDate(endDate);
+        const checkStart = new Date(startDateObj);
+        checkStart.setHours(0, 0, 0, 0);
 
-    if (leaveEnd < leaveStart) {
-      return res
-        .status(400)
-        .json({ message: "End date cannot be before start date" });
-    }
+        if (checkStart < today) {
+            return res.status(400).json({ message: 'Cannot apply for a leave in the past.' });
+        }
 
-    if (type === "Casual") {
-      const minAllowedDate = new Date(today);
-      minAllowedDate.setDate(minAllowedDate.getDate() + 1);
-      if (leaveStart < minAllowedDate) {
-        return res.status(400).json({
-          message:
-            "Casual leave must be applied at least 1 day before the leave date.",
+        const oneYearFromNow = new Date();
+        oneYearFromNow.setFullYear(today.getFullYear() + 1);
+
+        if (endDateObj > oneYearFromNow) {
+            return res.status(400).json({ message: 'Cannot apply for a leave more than 1 year in advance.' });
+        }
+
+        if (type === 'Annual') {
+            const joinDate = req.user.joiningDate || req.user.createdAt;
+            const joinDateObj = new Date(joinDate);
+            const currentDate = new Date();
+            
+            let months = (currentDate.getFullYear() - joinDateObj.getFullYear()) * 12;
+            months -= joinDateObj.getMonth();
+            months += currentDate.getMonth();
+            
+            if (currentDate.getDate() < joinDateObj.getDate()) {
+                months--;
+            }
+
+            if (months < 6) {
+                return res.status(400).json({ message: 'You must complete 6 months of service to be eligible for Annual Leave.' });
+            }
+        }
+
+        const currentYear = new Date().getFullYear();
+        const startOfYear = new Date(currentYear, 0, 1);
+        const endOfYear = new Date(currentYear, 11, 31, 23, 59, 59);
+
+        const existingLeaves = await Leave.find({
+            employeeId: req.user._id,
+            type: type,
+            status: { $ne: 'Rejected' },
+            startDate: { $gte: startOfYear, $lte: endOfYear }
         });
-      }
-    }
 
-    if (type === "Sick") {
-      const earliestAllowedDate = new Date(today);
-      earliestAllowedDate.setDate(earliestAllowedDate.getDate() - 1);
-      const latestAllowedDate = new Date(today);
-      if (leaveStart < earliestAllowedDate || leaveStart > latestAllowedDate) {
-        return res.status(400).json({
-          message:
-            "Sick leave can only be applied on the same day or the next day.",
+        let usedDays = 0;
+        existingLeaves.forEach(l => {
+            const ls = new Date(l.startDate);
+            const le = new Date(l.endDate);
+            const diff = le.getTime() - ls.getTime();
+            usedDays += Math.ceil(diff / (1000 * 3600 * 24)) + 1;
         });
-      }
-    }
 
-    if (type === "Annual") {
-      const minAllowedDate = new Date(today);
-      minAllowedDate.setDate(minAllowedDate.getDate() + 7);
-      if (leaveStart < minAllowedDate) {
-        return res.status(400).json({
-          message:
-            "Annual leave must be applied at least 7 days before the leave date.",
+        const limits = {
+            'Casual': 10,
+            'Sick': 14,
+            'Annual': 21
+        };
+
+        const limit = limits[type] || 0;
+
+        if (usedDays + daysRequested > limit) {
+            return res.status(400).json({ 
+                message: `Exceeds annual limit for ${type} leave. Limit: ${limit} days, Used/Pending: ${usedDays} days` 
+            });
+        }
+
+        const leave = await Leave.create({
+            employeeId: req.user._id,
+            startDate,
+            endDate,
+            type,
+            reason
         });
-      }
+
+        res.status(201).json(leave);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
     }
-
-    const limit = getLeaveLimit(type);
-    const limitDays = Number(limit);
-
-    if (limit) {
-      const { start, end } = getPeriodRange(
-        type,
-        getEffectiveReferenceDate(type, startDate, endDate),
-      );
-      const existingLeaves = await Leave.find({
-        employeeId: req.user._id,
-        type,
-        status: { $in: ["Pending", "Approved"] },
-        startDate: { $gte: start, $lte: end },
-      });
-
-      const usedDays = existingLeaves.reduce((total, leave) => {
-        const leaveDays = Number(leave.days) || getRequestedLeaveDays(leave);
-        return total + leaveDays;
-      }, 0);
-
-      if (usedDays + requestedDays > limitDays) {
-        return res.status(400).json({
-          message: `${type} leave limit reached ${getLeaveLimitWindowLabel(type)}.`,
-        });
-      }
-    }
-
-    const leave = await Leave.create({
-      employeeId: req.user._id,
-      startDate,
-      endDate,
-      type,
-      reason,
-      days: requestedDays,
-    });
-
-    res.status(201).json(leave);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
 };
 
 // @desc    Get my leaves
 // @route   GET /api/leaves/my
 // @access  Private
 const getMyLeaves = async (req, res) => {
-  try {
-    const leaves = await Leave.find({ employeeId: req.user._id }).sort({
-      createdAt: -1,
-    });
-    res.json(leaves);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+    try {
+        const leaves = await Leave.find({ employeeId: req.user._id }).sort({ createdAt: -1 });
+        res.json(leaves);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
 };
 
 // @desc    Get all leaves
 // @route   GET /api/leaves
 // @access  Private/Admin
 const getAllLeaves = async (req, res) => {
-  try {
-    const leaves = await Leave.find({})
-      .populate("employeeId", "name email role")
-      .sort({ createdAt: -1 });
-    res.json(leaves);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
+    try {
+        const leaves = await Leave.find({}).populate('employeeId', 'name email role').sort({ createdAt: -1 });
+        res.json(leaves);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
 };
 
 // @desc    Update leave status (Approve/Reject)
 // @route   PUT /api/leaves/:id
-// @access  Private/Admin or HR depending on requester role
+// @access  Private/Admin
 const updateLeaveStatus = async (req, res) => {
-  try {
-    const { status } = req.body; // 'Approved' or 'Rejected'
+    try {
+        const { status } = req.body; // 'Approved' or 'Rejected'
+        
+        const leave = await Leave.findById(req.params.id);
+        
+        if (leave) {
+            await leave.populate('employeeId');
+            
+            if (leave.employeeId.role === 'HR') {
+                if (req.user.role !== 'Admin') {
+                    return res.status(403).json({ message: 'Only Admin can update HR leave status' });
+                }
+            } else {
+                if (req.user.role !== 'HR') {
+                    return res.status(403).json({ message: 'Only HR can update Employee leave status' });
+                }
+            }
 
-    const leave = await Leave.findById(req.params.id).populate(
-      "employeeId",
-      "name email role",
-    );
-
-    if (leave) {
-      // Prevent HR from approving/rejecting their own leave requests
-      if (
-        req.user.role === "HR" &&
-        leave.employeeId?._id?.toString() === req.user._id?.toString()
-      ) {
-        return res.status(403).json({
-          message:
-            "HR cannot approve or reject their own leave requests. Admin approval is required.",
-        });
-      }
-      const requesterRole = leave.employeeId?.role;
-      const approverRole = req.user.role;
-
-      if (requesterRole === "Employee" && approverRole !== "HR") {
-        return res.status(403).json({
-          message: "Only HR can approve or reject employee leave requests",
-        });
-      }
-
-      if (requesterRole === "HR" && approverRole !== "Admin") {
-        return res.status(403).json({
-          message: "Only Admin can approve or reject HR leave requests",
-        });
-      }
-
-      if (requesterRole !== "Employee" && requesterRole !== "HR") {
-        return res.status(403).json({
-          message:
-            "Leave approval is only supported for Employee or HR requests",
-        });
-      }
-
-      leave.status = status;
-      await leave.save();
-      res.json(leave);
-    } else {
-      res.status(404).json({ message: "Leave not found" });
+            leave.status = status;
+            await leave.save();
+            res.json(leave);
+        } else {
+            res.status(404).json({ message: 'Leave not found' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: error.message });
     }
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
 };
 
-// @desc    Edit a leave (HR/Admin)
-// @route   PATCH /api/leaves/:id
-// @access  Private/Admin or HR
-const editLeave = async (req, res) => {
-  try {
-    const { startDate, endDate, type, reason, days } = req.body;
-
-    const leave = await Leave.findById(req.params.id).populate(
-      "employeeId",
-      "name email role",
-    );
-
-    if (!leave) return res.status(404).json({ message: "Leave not found" });
-
-    const targetRole = leave.employeeId?.role;
-    const requesterRole = req.user.role;
-
-    if (
-      targetRole === "Employee" &&
-      requesterRole !== "HR" &&
-      requesterRole !== "Admin"
-    ) {
-      return res
-        .status(403)
-        .json({ message: "Only HR or Admin can edit employee leaves" });
-    }
-
-    if (targetRole === "HR" && requesterRole !== "Admin") {
-      return res.status(403).json({ message: "Only Admin can edit HR leaves" });
-    }
-
-    // basic validation if dates/types provided
-    if (startDate && endDate) {
-      const leaveStart = normalizeDate(startDate);
-      const leaveEnd = normalizeDate(endDate);
-      if (leaveEnd < leaveStart) {
-        return res
-          .status(400)
-          .json({ message: "End date cannot be before start date" });
-      }
-    }
-
-    if (type && !["Sick", "Casual", "Annual"].includes(type)) {
-      return res.status(400).json({ message: "Invalid leave type" });
-    }
-
-    // apply updates
-    if (startDate) leave.startDate = startDate;
-    if (endDate) leave.endDate = endDate;
-    if (type) leave.type = type;
-    if (reason) leave.reason = reason;
-    // recalc days
-    leave.days = getRequestedLeaveDays({
-      startDate: leave.startDate,
-      endDate: leave.endDate,
-      days,
-    });
-
-    await leave.save();
-    res.json(leave);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
-};
-
-// @desc    Delete a leave (HR/Admin)
+// @desc    Delete leave
 // @route   DELETE /api/leaves/:id
-// @access  Private/Admin or HR
+// @access  Private
 const deleteLeave = async (req, res) => {
-  try {
-    const leave = await Leave.findById(req.params.id).populate(
-      "employeeId",
-      "name email role",
-    );
+    try {
+        const leave = await Leave.findById(req.params.id);
 
-    if (!leave) return res.status(404).json({ message: "Leave not found" });
+        if (!leave) {
+            return res.status(404).json({ message: 'Leave not found' });
+        }
 
-    const targetRole = leave.employeeId?.role;
-    const requesterRole = req.user.role;
+        await leave.populate('employeeId');
+        
+        let canDelete = false;
+        if (leave.employeeId._id.toString() === req.user._id.toString()) {
+            if (leave.status === 'Pending') canDelete = true;
+        } else if (leave.employeeId.role === 'HR' && req.user.role === 'Admin') {
+            canDelete = true;
+        } else if (leave.employeeId.role === 'Employee' && req.user.role === 'HR') {
+            canDelete = true;
+        }
 
-    if (
-      targetRole === "Employee" &&
-      requesterRole !== "HR" &&
-      requesterRole !== "Admin"
-    ) {
-      return res
-        .status(403)
-        .json({ message: "Only HR or Admin can delete employee leaves" });
+        if (!canDelete) {
+            return res.status(403).json({ message: 'Not authorized to delete this leave' });
+        }
+
+        await Leave.deleteOne({ _id: leave._id });
+        res.json({ message: 'Leave deleted' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
     }
-
-    if (targetRole === "HR" && requesterRole !== "Admin") {
-      return res
-        .status(403)
-        .json({ message: "Only Admin can delete HR leaves" });
-    }
-
-    await Leave.deleteOne({ _id: leave._id });
-    res.json({ message: "Leave deleted" });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
 };
 
-// @desc    Get approved leaves overlapping today
-// @route   GET /api/leaves/onleave
-// @access  Private/Admin or HR
-const getOnLeave = async (req, res) => {
-  try {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const endOfToday = new Date();
-    endOfToday.setHours(23, 59, 59, 999);
+// @desc    Update leave details
+// @route   PUT /api/leaves/edit/:id
+// @access  Private
+const updateLeave = async (req, res) => {
+    try {
+        const { startDate, endDate, type, reason } = req.body;
+        const leave = await Leave.findById(req.params.id);
 
-    const leaves = await Leave.find({
-      status: "Approved",
-      startDate: { $lte: endOfToday },
-      endDate: { $gte: startOfToday },
-    })
-      .populate("employeeId", "name email role")
-      .sort({ startDate: 1 });
+        if (!leave) {
+            return res.status(404).json({ message: 'Leave not found' });
+        }
 
-    // If requester is HR, only show Employee leaves; Admin sees all
-    if (req.user && req.user.role === "HR") {
-      const employeeLeaves = leaves.filter(
-        (l) => l.employeeId && l.employeeId.role === "Employee",
-      );
-      return res.json(employeeLeaves);
+        await leave.populate('employeeId');
+
+        let canEdit = false;
+        if (leave.employeeId._id.toString() === req.user._id.toString()) {
+            if (leave.status === 'Pending') canEdit = true;
+        } else if (leave.employeeId.role === 'HR' && req.user.role === 'Admin') {
+            canEdit = true;
+        } else if (leave.employeeId.role === 'Employee' && req.user.role === 'HR') {
+            canEdit = true;
+        }
+
+        if (!canEdit) {
+            return res.status(403).json({ message: 'Not authorized to edit this leave' });
+        }
+
+        const startDateObj = new Date(startDate || leave.startDate);
+        const endDateObj = new Date(endDate || leave.endDate);
+        const typeToCheck = type || leave.type;
+
+        const timeDiff = endDateObj.getTime() - startDateObj.getTime();
+        const daysRequested = Math.ceil(timeDiff / (1000 * 3600 * 24)) + 1;
+        
+        if (daysRequested <= 0) {
+            return res.status(400).json({ message: 'End date must be after start date' });
+        }
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const checkStart = new Date(startDateObj);
+        checkStart.setHours(0, 0, 0, 0);
+
+        if (checkStart < today) {
+            return res.status(400).json({ message: 'Cannot apply for a leave in the past.' });
+        }
+
+        const oneYearFromNow = new Date();
+        oneYearFromNow.setFullYear(today.getFullYear() + 1);
+
+        if (endDateObj > oneYearFromNow) {
+            return res.status(400).json({ message: 'Cannot apply for a leave more than 1 year in advance.' });
+        }
+
+        const currentYear = new Date().getFullYear();
+        const startOfYear = new Date(currentYear, 0, 1);
+        const endOfYear = new Date(currentYear, 11, 31, 23, 59, 59);
+
+        const existingLeaves = await Leave.find({
+            employeeId: leave.employeeId,
+            type: typeToCheck,
+            status: { $ne: 'Rejected' },
+            _id: { $ne: leave._id },
+            startDate: { $gte: startOfYear, $lte: endOfYear }
+        });
+
+        let usedDays = 0;
+        existingLeaves.forEach(l => {
+            const ls = new Date(l.startDate);
+            const le = new Date(l.endDate);
+            const diff = le.getTime() - ls.getTime();
+            usedDays += Math.ceil(diff / (1000 * 3600 * 24)) + 1;
+        });
+
+        const limits = { 'Casual': 10, 'Sick': 14, 'Annual': 21 };
+        const limit = limits[typeToCheck] || 0;
+
+        if (usedDays + daysRequested > limit) {
+            return res.status(400).json({ 
+                message: `Exceeds annual limit for ${typeToCheck} leave. Limit: ${limit} days, Used/Pending: ${usedDays} days` 
+            });
+        }
+
+        leave.startDate = startDate || leave.startDate;
+        leave.endDate = endDate || leave.endDate;
+        leave.type = type || leave.type;
+        leave.reason = reason || leave.reason;
+
+        const updatedLeave = await leave.save();
+        const populatedLeave = await updatedLeave.populate('employeeId', 'name email');
+        res.json(populatedLeave);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
     }
-
-    res.json(leaves);
-  } catch (error) {
-    res.status(500).json({ message: error.message });
-  }
 };
 
 module.exports = {
-  applyLeave,
-  getMyLeaves,
-  getAllLeaves,
-  updateLeaveStatus,
-  editLeave,
-  deleteLeave,
-  getOnLeave,
+    applyLeave,
+    getMyLeaves,
+    getAllLeaves,
+    updateLeaveStatus,
+    deleteLeave,
+    updateLeave
 };

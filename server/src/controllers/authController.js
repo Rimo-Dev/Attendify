@@ -26,6 +26,8 @@ const loginUser = async (req, res) => {
                 shiftEndTime: user.shiftEndTime,
                 department: user.department,
                 designation: user.designation,
+                joiningDate: user.joiningDate,
+                createdAt: user.createdAt,
                 token: generateToken(user._id),
             });
         } else {

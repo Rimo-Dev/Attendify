@@ -4,5 +4,6 @@ const { predictSalary } = require('../controllers/salaryController');
 const { protect } = require('../middlewares/authMiddleware');
 
 router.get('/predict', protect, predictSalary);
+router.get('/predict/:id', protect, predictSalary);
 
 module.exports = router;

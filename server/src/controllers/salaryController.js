@@ -1,103 +1,30 @@
 const User = require("../models/User");
 const Attendance = require("../models/Attendance");
-const Holiday = require("../models/Holiday");
 const Leave = require("../models/Leave");
-const Announcement = require("../models/Announcement");
-
-const buildDayKey = (date) =>
-  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-    date.getDate(),
-  ).padStart(2, "0")}`;
-
-const getWorkingDays = (startDate, endDate, holidaySet) => {
-  let workingDays = 0;
-
-  for (
-    let day = new Date(startDate);
-    day <= endDate;
-    day.setDate(day.getDate() + 1)
-  ) {
-    const dayOfWeek = day.getDay();
-
-    // Exclude Fridays (5) and Saturdays (6)
-    if (dayOfWeek === 5 || dayOfWeek === 6) {
-      continue;
-    }
-
-    if (holidaySet.has(buildDayKey(day))) {
-      continue;
-    }
-
-    workingDays++;
-  }
-
-  return workingDays;
-};
-
-const addAnnouncementHolidayDays = ({
-  announcements,
-  rangeStart,
-  rangeEnd,
-  map,
-}) => {
-  const mapRef = map || new Map();
-
-  announcements.forEach((announcement) => {
-    let start =
-      announcement.holidayStartDate ||
-      announcement.holidayDate ||
-      announcement.holidayEndDate ||
-      null;
-    let end =
-      announcement.holidayEndDate ||
-      announcement.holidayDate ||
-      announcement.holidayStartDate ||
-      null;
-
-    if (!start || !end) {
-      return;
-    }
-
-    start = new Date(start);
-    end = new Date(end);
-    start.setHours(0, 0, 0, 0);
-    end.setHours(0, 0, 0, 0);
-
-    if (start > end) {
-      const tmp = start;
-      start = end;
-      end = tmp;
-    }
-
-    const effectiveStart = start < rangeStart ? new Date(rangeStart) : start;
-    const effectiveEnd = end > rangeEnd ? new Date(rangeEnd) : end;
-    effectiveStart.setHours(0, 0, 0, 0);
-    effectiveEnd.setHours(0, 0, 0, 0);
-
-    for (
-      let day = new Date(effectiveStart);
-      day <= effectiveEnd;
-      day.setDate(day.getDate() + 1)
-    ) {
-      const key = buildDayKey(day);
-      if (!mapRef.has(key)) {
-        mapRef.set(
-          key,
-          announcement.holidayName || announcement.title || "Holiday",
-        );
-      }
-    }
-  });
-
-  return mapRef;
-};
+const {
+  toDateOnly,
+  getMonthStart,
+  getMonthEnd,
+  getHolidaySetForMonth,
+  isWorkingDay,
+  countWorkingDays,
+} = require("../utils/workingDays");
 
 // @desc    Get Salary Prediction for Employee
 // @route   GET /api/salary/predict
 // @access  Private
 const predictSalary = async (req, res) => {
   try {
-    const employeeId = req.user._id;
+    let employeeId = req.user._id;
+
+    if (req.params.id) {
+      if (req.user.role === "Admin" || req.user.role === "HR") {
+        employeeId = req.params.id;
+      } else if (req.params.id !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Not authorized" });
+      }
+    }
+
     const employee = await User.findById(employeeId);
 
     if (!employee) {
@@ -105,317 +32,158 @@ const predictSalary = async (req, res) => {
     }
 
     const baseSalary = employee.baseSalary || 0;
-    const gracePeriodMinutes = 5;
 
-    // Shift Time Calculation
-    const [shiftStartHour, shiftStartMin] = String(
-      employee.shiftStartTime || "09:00",
-    )
-      .split(":")
-      .map(Number);
+    const now = toDateOnly(new Date());
+    const joinDate = employee.joiningDate || employee.createdAt;
+    const joinStart = toDateOnly(joinDate);
+    const targetMonthAnchor = joinStart > now ? joinStart : now;
 
-    const [shiftEndHour, shiftEndMin] = String(employee.shiftEndTime || "17:00")
-      .split(":")
-      .map(Number);
+    // Calculate the effective month for salary/attendance
+    const firstDay = getMonthStart(targetMonthAnchor);
+    const lastDay = getMonthEnd(targetMonthAnchor);
+    const holidaySet = await getHolidaySetForMonth(firstDay, lastDay);
 
-    const shiftStartTotalMinutes = shiftStartHour * 60 + shiftStartMin;
-    const shiftEndTotalMinutes = shiftEndHour * 60 + shiftEndMin;
-
-    // Current Date Setup
-    const currentDate = new Date();
-    const today = new Date(currentDate);
-    today.setHours(23, 59, 59, 999);
-
-    const monthStart = new Date(
-      currentDate.getFullYear(),
-      currentDate.getMonth(),
+    const totalWorkingDaysInMonth = Math.max(
       1,
-    );
-    monthStart.setHours(0, 0, 0, 0);
-
-    const monthEnd = new Date(
-      currentDate.getFullYear(),
-      currentDate.getMonth() + 1,
-      0,
-    );
-    monthEnd.setHours(23, 59, 59, 999);
-
-    // Employee Joining Date
-    // If no joiningDate exists, fallback to createdAt
-    let employeeJoiningDate = employee.joiningDate
-      ? new Date(employee.joiningDate)
-      : employee.createdAt
-        ? new Date(employee.createdAt)
-        : today;
-
-    employeeJoiningDate.setHours(0, 0, 0, 0);
-
-    // 30-day salary cycle starting from joining date
-    // Calculate which 30-day cycle the employee is currently in
-    const daysSinceJoining = Math.floor(
-      (today - employeeJoiningDate) / (1000 * 60 * 60 * 24),
-    );
-    const cycleNumber = Math.floor(daysSinceJoining / 30);
-
-    const salaryPeriodStart = new Date(employeeJoiningDate);
-    salaryPeriodStart.setDate(salaryPeriodStart.getDate() + cycleNumber * 30);
-    salaryPeriodStart.setHours(0, 0, 0, 0);
-
-    const salaryPeriodEnd = new Date(salaryPeriodStart);
-    salaryPeriodEnd.setDate(salaryPeriodEnd.getDate() + 29); // 30 days total (0-29)
-    salaryPeriodEnd.setHours(23, 59, 59, 999);
-
-    const [
-      salaryPeriodHolidayDocs,
-      monthHolidayDocs,
-      salaryAnnouncementHolidays,
-      monthAnnouncementHolidays,
-    ] = await Promise.all([
-      Holiday.find({
-        date: { $gte: salaryPeriodStart, $lte: salaryPeriodEnd },
-      }).select("date"),
-      Holiday.find({
-        date: { $gte: monthStart, $lte: monthEnd },
-      })
-        .select("name date")
-        .sort({ date: 1, _id: 1 }),
-      Announcement.find({
-        $or: [
-          { holidayDate: { $gte: salaryPeriodStart, $lte: salaryPeriodEnd } },
-          {
-            holidayStartDate: {
-              $gte: salaryPeriodStart,
-              $lte: salaryPeriodEnd,
-            },
-          },
-          {
-            holidayEndDate: { $gte: salaryPeriodStart, $lte: salaryPeriodEnd },
-          },
-          {
-            holidayStartDate: { $lte: salaryPeriodEnd },
-            holidayEndDate: { $gte: salaryPeriodStart },
-          },
-        ],
-      }).select(
-        "title holidayName holidayDate holidayStartDate holidayEndDate",
-      ),
-      Announcement.find({
-        $or: [
-          { holidayDate: { $gte: monthStart, $lte: monthEnd } },
-          { holidayStartDate: { $gte: monthStart, $lte: monthEnd } },
-          { holidayEndDate: { $gte: monthStart, $lte: monthEnd } },
-          {
-            holidayStartDate: { $lte: monthEnd },
-            holidayEndDate: { $gte: monthStart },
-          },
-        ],
-      }).select(
-        "title holidayName holidayDate holidayStartDate holidayEndDate",
-      ),
-    ]);
-
-    const holidaySet = new Set(
-      salaryPeriodHolidayDocs.map((holiday) =>
-        buildDayKey(new Date(holiday.date)),
-      ),
+      countWorkingDays(firstDay, lastDay, holidaySet),
     );
 
-    const salaryHolidayMap = addAnnouncementHolidayDays({
-      announcements: salaryAnnouncementHolidays,
-      rangeStart: salaryPeriodStart,
-      rangeEnd: salaryPeriodEnd,
-      map: new Map(),
-    });
-    salaryHolidayMap.forEach((_, key) => holidaySet.add(key));
-
-    const monthHolidayMap = new Map(
-      monthHolidayDocs.map((holiday) => [
-        buildDayKey(new Date(holiday.date)),
-        holiday.name || "Holiday",
-      ]),
+    const eligibleStart = joinStart > firstDay ? joinStart : firstDay;
+    const paidWorkingDays = countWorkingDays(
+      eligibleStart,
+      lastDay,
+      holidaySet,
     );
 
-    addAnnouncementHolidayDays({
-      announcements: monthAnnouncementHolidays,
-      rangeStart: monthStart,
-      rangeEnd: monthEnd,
-      map: monthHolidayMap,
-    });
-
-    const companyHolidaysThisMonth = Array.from(monthHolidayMap.entries())
-      .map(([date, name]) => ({ date, name }))
-      .sort((a, b) => a.date.localeCompare(b.date));
-
-    // Get Attendance Records
+    // Find attendance this month
     const attendances = await Attendance.find({
       employeeId,
-      date: { $gte: salaryPeriodStart, $lte: today },
+      date: { $gte: firstDay, $lte: lastDay },
     });
 
-    // Get Approved Leaves overlapping the salary period up to today
-    const leaveDocs = await Leave.find({
-      employeeId,
-      status: "Approved",
-      $or: [
-        { startDate: { $gte: salaryPeriodStart, $lte: today } },
-        { endDate: { $gte: salaryPeriodStart, $lte: today } },
-        {
-          startDate: { $lte: salaryPeriodStart },
-          endDate: { $gte: salaryPeriodStart },
-        },
-      ],
-    }).select("startDate endDate type");
-
-    // Build a set of leave day keys that fall within salaryPeriodStart..today and are working days (not weekend, not company holiday)
-    const leaveDaySet = new Set();
-    leaveDocs.forEach((l) => {
-      const s = new Date(l.startDate);
-      const e = new Date(l.endDate);
-      s.setHours(0, 0, 0, 0);
-      e.setHours(0, 0, 0, 0);
-
-      const from = s < salaryPeriodStart ? new Date(salaryPeriodStart) : s;
-      const to = e > today ? new Date(today) : e;
-
-      for (let d = new Date(from); d <= to; d.setDate(d.getDate() + 1)) {
-        const dayKey = buildDayKey(new Date(d));
-        const dayOfWeek = new Date(d).getDay();
-        // exclude weekends
-        if (dayOfWeek === 5 || dayOfWeek === 6) continue;
-        // exclude company holidays
-        if (holidaySet && holidaySet.has(dayKey)) continue;
-        leaveDaySet.add(dayKey);
-      }
-    });
-
-    // Metrics
-    const attendanceDays = new Set();
+    // Calculate metrics
     let presentDays = 0;
     let lateDays = 0;
     let totalLateMinutes = 0;
-    let chargeableLateMinutes = 0;
 
     attendances.forEach((att) => {
-      attendanceDays.add(buildDayKey(new Date(att.date)));
+      const attendanceDate = toDateOnly(att.date);
 
-      if (att.status === "Present") {
-        presentDays++;
+      // Only count attendance on business days.
+      if (!isWorkingDay(attendanceDate, holidaySet)) {
+        return;
       }
 
+      if (att.status === "Present") presentDays++;
       if (att.status === "Late") {
-        presentDays++;
+        presentDays++; // Count late as present but note the late
         lateDays++;
-
-        const rawLateMinutes = Number(att.lateDuration || 0);
-
-        totalLateMinutes += rawLateMinutes;
-
-        const deductibleMinutes = Math.max(
-          0,
-          rawLateMinutes - gracePeriodMinutes,
-        );
-
-        chargeableLateMinutes += deductibleMinutes;
+        totalLateMinutes += att.lateDuration;
       }
     });
 
-    // Working Days Count
-    // Total working days in the current month's salary period
-    const totalWorkingDays = getWorkingDays(
-      salaryPeriodStart,
-      salaryPeriodEnd,
-      holidaySet,
-    );
+    // Simplified salary logic
+    // E.g., deduct 0.5 day salary for every 3 late days
+    const latePenaltyDays = Math.floor(lateDays / 3) * 0.5;
 
-    // Working days completed so far (from salary period start to today)
-    const workingDaysSoFar = getWorkingDays(
-      salaryPeriodStart,
-      today,
-      holidaySet,
-    );
+    const dailyRate = baseSalary / totalWorkingDaysInMonth;
+    const proratedGrossSalary = dailyRate * paidWorkingDays;
 
-    const attendanceCount = attendanceDays.size;
-    const leaveDaysCount = leaveDaySet.size;
+    // Find approved leaves this month
+    const approvedLeaves = await Leave.find({
+      employeeId,
+      status: "Approved",
+      $or: [{ startDate: { $lte: lastDay }, endDate: { $gte: firstDay } }],
+    });
+
+    // We calculate absent days up to today, not the end of the month
+    let workingDaysPassed = 0;
+    let leaveDaysPassed = 0;
+    const daysPassed = now.getDate();
+    for (let i = 1; i <= daysPassed; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth(), i);
+      const dStart = toDateOnly(d);
+
+      if (dStart >= joinStart) {
+        if (isWorkingDay(dStart, holidaySet)) {
+          workingDaysPassed++;
+
+          // Check if on approved leave
+          for (const leave of approvedLeaves) {
+            const ls = toDateOnly(leave.startDate);
+            const le = toDateOnly(leave.endDate);
+            if (dStart >= ls && dStart <= le) {
+              leaveDaysPassed++;
+              break;
+            }
+          }
+        }
+      }
+    }
+
     const absentDays = Math.max(
       0,
-      workingDaysSoFar - attendanceCount - leaveDaysCount,
+      workingDaysPassed - presentDays - leaveDaysPassed,
     );
 
-    // Salary Calculations
-    const dailyRate = totalWorkingDays > 0 ? baseSalary / totalWorkingDays : 0;
-
-    const dailyWorkMinutes =
-      Math.max(1, shiftEndTotalMinutes - shiftStartTotalMinutes) || 8 * 60;
-
-    const perMinuteSalaryRate =
-      dailyWorkMinutes > 0 ? dailyRate / dailyWorkMinutes : 0;
-
-    const lateDeduction = chargeableLateMinutes * perMinuteSalaryRate;
-
+    const lateDeduction = latePenaltyDays * dailyRate;
     const absentDeduction = absentDays * dailyRate;
-
-    const monthlySalaryCut = lateDeduction + absentDeduction;
-
-    const predictedSalary = Math.max(0, baseSalary - monthlySalaryCut);
-
-    const workingDaysRemaining = Math.max(
+    const predictedSalary = Math.max(
       0,
-      totalWorkingDays - workingDaysSoFar,
+      proratedGrossSalary - lateDeduction - absentDeduction,
     );
-    const workingProgressPercent =
-      totalWorkingDays > 0 ? (workingDaysSoFar / totalWorkingDays) * 100 : 0;
 
-    // Salary is finalized only when the salary period is complete
-    const isSalaryFinalized =
-      today >= salaryPeriodEnd && workingDaysRemaining === 0;
-    const finalSalary = isSalaryFinalized ? predictedSalary : null;
+    const breakdown = [
+      {
+        id: 1,
+        type: "Earnings",
+        description: `Prorated Salary (${paidWorkingDays} days @ ${dailyRate.toFixed(2)}/day)`,
+        amount: proratedGrossSalary.toFixed(2),
+        isDeduction: false,
+      },
+      {
+        id: 2,
+        type: "Deduction",
+        description: `Absences (${absentDays} days @ ${dailyRate.toFixed(2)}/day)`,
+        amount: absentDeduction.toFixed(2),
+        isDeduction: true,
+      },
+      {
+        id: 3,
+        type: "Deduction",
+        description: `Late Penalty (${lateDays} days late -> ${latePenaltyDays} penalty days @ ${dailyRate.toFixed(2)}/day)`,
+        amount: lateDeduction.toFixed(2),
+        isDeduction: true,
+      },
+    ];
 
-    // Response
     res.json({
+      employeeName: employee.name,
       baseSalary,
-      totalWorkingDays,
-      workingDaysSoFar,
-      workingDaysRemaining,
-      workingProgressPercent: Number(workingProgressPercent.toFixed(2)),
-      salaryPeriodStart: salaryPeriodStart.toISOString().split("T")[0],
-      salaryPeriodEnd: salaryPeriodEnd.toISOString().split("T")[0],
-      dailyWorkMinutes,
-      perMinuteSalaryRate: perMinuteSalaryRate.toFixed(4),
-      dailyRate: dailyRate.toFixed(2),
-      gracePeriodMinutes,
-
+      workingDaysInMonth: totalWorkingDaysInMonth,
+      paidWorkingDays,
       presentDays,
       absentDays,
       lateDays,
-
       totalLateMinutes,
-      chargeableLateMinutes,
-      companyHolidayCount: holidaySet.size,
-      companyHolidayCountThisMonth: companyHolidaysThisMonth.length,
-      companyHolidaysThisMonth,
-      companyHolidayMonth: `${monthStart.getFullYear()}-${String(
-        monthStart.getMonth() + 1,
-      ).padStart(2, "0")}`,
-      leaveDaysCount: leaveDaySet ? leaveDaySet.size : 0,
-      leaveDates: leaveDaySet ? Array.from(leaveDaySet).sort() : [],
-
       lateDeduction: lateDeduction.toFixed(2),
       absentDeduction: absentDeduction.toFixed(2),
-
-      monthlySalaryCut: monthlySalaryCut.toFixed(2),
-      salaryCutSoFar: monthlySalaryCut.toFixed(2),
-
       predictedSalary: predictedSalary.toFixed(2),
-      finalSalary: finalSalary !== null ? finalSalary.toFixed(2) : null,
-      isSalaryFinalized,
-      salaryStatus: isSalaryFinalized ? "final" : "predicted",
-
       currency: "৳",
+      breakdown,
+      dailyRate: dailyRate.toFixed(2),
+      proratedGrossSalary: proratedGrossSalary.toFixed(2),
+      month: firstDay.toLocaleString("default", {
+        month: "long",
+        year: "numeric",
+      }),
+      appointmentMonth: joinStart.toLocaleString("default", {
+        month: "long",
+        year: "numeric",
+      }),
     });
   } catch (error) {
-    res.status(500).json({
-      message: error.message,
-    });
+    res.status(500).json({ message: error.message });
   }
 };
 

@@ -1,8 +1,38 @@
 const User = require("../models/User");
 
-// Helper to escape user-supplied department strings for regex
-const escapeRegex = (str) => {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const toDateOnly = (value) => {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+
+const getMaxJoiningDate = () => {
+  const today = new Date();
+  return new Date(today.getFullYear(), 11, 31, 23, 59, 59, 999);
+};
+
+const isValidJoiningDate = (value) => {
+  if (!value) {
+    return false;
+  }
+
+  const joiningDate = toDateOnly(value);
+  const today = toDateOnly(new Date());
+  const maxJoiningDate = getMaxJoiningDate();
+
+  return joiningDate >= today && joiningDate <= maxJoiningDate;
+};
+
+const normalizeDepartmentForRole = (role, department) => {
+  if (role === "Admin") {
+    return "";
+  }
+
+  if (role === "HR") {
+    return "HR";
+  }
+
+  return department || "";
 };
 
 // @desc    Get all employees
@@ -10,22 +40,14 @@ const escapeRegex = (str) => {
 // @access  Private/Admin
 const getEmployees = async (req, res) => {
   try {
-    // Role-based filtering:
-    // - Admin: should not see Admin users (hide admin accounts in admin panel)
-    // - HR: should only see users with role 'Employee' within their department
-    // - Fallback: return no users
-    let filter = {};
-
-    if (req.user && req.user.role === "Admin") {
-      filter = { role: { $ne: "Admin" } };
-    } else if (req.user && req.user.role === "HR") {
-      // HR should see all users except Admin and themselves
-      filter = { role: { $ne: "Admin" }, _id: { $ne: req.user._id } };
+    let query = {};
+    if (req.user.role === "Admin") {
+      query = { _id: { $ne: req.user._id } };
     } else {
-      return res.status(403).json({ message: "Not authorized to view users" });
+      query = { role: { $nin: ["Admin", "HR"] } };
     }
 
-    const employees = await User.find(filter).select("-password");
+    const employees = await User.find(query).select("-password");
     res.json(employees);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -39,23 +61,6 @@ const getEmployeeById = async (req, res) => {
   try {
     const employee = await User.findById(req.params.id).select("-password");
     if (employee) {
-      // HR cannot view Admin users or their own user record
-      if (req.user && req.user.role === "HR") {
-        if (
-          employee.role === "Admin" ||
-          String(employee._id) === String(req.user._id)
-        ) {
-          return res
-            .status(403)
-            .json({ message: "Not authorized to view this user" });
-        }
-      }
-      // Admin should not see Admin accounts in the admin panel
-      if (req.user && req.user.role === "Admin" && employee.role === "Admin") {
-        return res
-          .status(403)
-          .json({ message: "Not authorized to view this user" });
-      }
       res.json(employee);
     } else {
       res.status(404).json({ message: "Employee not found" });
@@ -80,34 +85,32 @@ const createEmployee = async (req, res) => {
       shiftEndTime,
       department,
       designation,
+      joiningDate,
     } = req.body;
+
+    if (!isValidJoiningDate(joiningDate)) {
+      return res.status(400).json({
+        message:
+          "Joining date must be from today through the end of the current year.",
+      });
+    }
 
     const userExists = await User.findOne({ email });
     if (userExists) {
       return res.status(400).json({ message: "User already exists" });
     }
 
-    // Prevent creating department names that look like roles
-    if (department === "HR" || department === "Admin") {
-      return res.status(400).json({ message: "Invalid department name" });
-    }
-
-    // If requester is HR, force created user to be an Employee
-    let createRole = role || "Employee";
-    if (req.user && req.user.role === "HR") {
-      createRole = "Employee";
-    }
-
     const employee = await User.create({
       name,
       email,
       password,
-      role: createRole,
+      role: role || "Employee",
       baseSalary: baseSalary || 0,
       shiftStartTime: shiftStartTime || "09:00",
       shiftEndTime: shiftEndTime || "17:00",
-      department: department || "",
+      department: normalizeDepartmentForRole(role || "Employee", department),
       designation: designation || "",
+      joiningDate,
     });
 
     if (employee) {
@@ -133,18 +136,15 @@ const updateEmployee = async (req, res) => {
     const employee = await User.findById(req.params.id);
 
     if (employee) {
-      // If requester is HR, they may only modify Employee users
-      if (req.user.role === "HR") {
-        if (employee.role !== "Employee") {
-          return res
-            .status(403)
-            .json({ message: "HR cannot modify Admin or HR users" });
-        }
+      if (req.user.role === "HR" && employee.role === "Admin") {
+        return res
+          .status(403)
+          .json({ message: "HR cannot modify Admin users" });
       }
-      const canEditRole = req.user.role === "Admin";
-
       employee.name = req.body.name || employee.name;
       employee.email = req.body.email || employee.email;
+      employee.role = req.body.role || employee.role;
+      employee.status = req.body.status || employee.status;
       employee.baseSalary =
         req.body.baseSalary !== undefined
           ? req.body.baseSalary
@@ -152,40 +152,35 @@ const updateEmployee = async (req, res) => {
       employee.shiftStartTime =
         req.body.shiftStartTime || employee.shiftStartTime;
       employee.shiftEndTime = req.body.shiftEndTime || employee.shiftEndTime;
-      if (req.body.department !== undefined) {
-        const newDept = req.body.department || "";
-        // Disallow departments named after roles
-        if (newDept === "HR" || newDept === "Admin") {
-          return res.status(400).json({ message: "Invalid department name" });
-        }
-        // HR is allowed to set department for Employee users
-        employee.department = newDept;
+      if (req.body.department !== undefined || req.body.role) {
+        employee.department = normalizeDepartmentForRole(
+          req.body.role || employee.role,
+          req.body.department,
+        );
+      }
+      if (employee.role === "Admin") {
+        employee.department = "";
       }
       employee.designation = req.body.designation || employee.designation;
-      if (req.body.joiningDate !== undefined) {
-        employee.joiningDate = req.body.joiningDate
-          ? new Date(req.body.joiningDate)
-          : null;
+      if (req.body.joiningDate) {
+        const currentJoiningDate = toDateOnly(employee.joiningDate);
+        const nextJoiningDate = toDateOnly(req.body.joiningDate);
+
+        if (
+          nextJoiningDate.getTime() !== currentJoiningDate.getTime() &&
+          !isValidJoiningDate(req.body.joiningDate)
+        ) {
+          return res.status(400).json({
+            message:
+              "Joining date must be from today through the end of the current year.",
+          });
+        }
+
+        employee.joiningDate = req.body.joiningDate;
       }
 
-      if (canEditRole) {
-        employee.role = req.body.role || employee.role;
-        employee.status = req.body.status || employee.status;
-        if (req.body.password) {
-          employee.password = req.body.password;
-        }
-      } else {
-        if (req.body.password) {
-          return res
-            .status(403)
-            .json({ message: "HR cannot change passwords" });
-        }
-        // HR cannot change role/status
-        if (req.user.role === "HR" && (req.body.role || req.body.status)) {
-          return res
-            .status(403)
-            .json({ message: "HR cannot change role or status" });
-        }
+      if (req.body.password) {
+        employee.password = req.body.password;
       }
 
       const updatedEmployee = await employee.save();
@@ -212,15 +207,11 @@ const deleteEmployee = async (req, res) => {
     const employee = await User.findById(req.params.id);
 
     if (employee) {
-      // HR can only delete Employee users (no Admin/HR deletions)
-      if (req.user && req.user.role === "HR") {
-        if (employee.role !== "Employee") {
-          return res
-            .status(403)
-            .json({ message: "HR cannot delete Admin or HR users" });
-        }
+      if (req.user.role === "HR" && employee.role === "Admin") {
+        return res
+          .status(403)
+          .json({ message: "HR cannot delete Admin users" });
       }
-
       await User.deleteOne({ _id: employee._id });
       res.json({ message: "Employee removed" });
     } else {

@@ -1,6 +1,6 @@
 import { LogIn } from "lucide-react";
 import { useContext, useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { AuthContext } from "../contexts/AuthContext";
 
 const Login = () => {
@@ -10,6 +10,7 @@ const Login = () => {
   const [isLoading, setIsLoading] = useState(false);
 
   const { login, user } = useContext(AuthContext);
+  const navigate = useNavigate();
 
   if (user) {
     return <Navigate to="/dashboard" />;
@@ -21,6 +22,7 @@ const Login = () => {
     setIsLoading(true);
     try {
       await login(email, password);
+      navigate("/dashboard");
     } catch (err) {
       setError(err.response?.data?.message || "Login failed");
     } finally {

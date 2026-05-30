@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 
 const holidaySchema = new mongoose.Schema(
   {
-    name: {
+    title: {
       type: String,
       required: true,
       trim: true,
@@ -10,21 +10,31 @@ const holidaySchema = new mongoose.Schema(
     date: {
       type: Date,
       required: true,
-      unique: true,
     },
-    description: {
+    type: {
       type: String,
-      default: "",
+      enum: ["Government", "Eid", "Company", "Other"],
+      default: "Other",
     },
-    sourceAnnouncement: {
+    sourceAnnouncementId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Announcement",
-      required: false,
+      default: null,
+    },
+    isRecurringAnnual: {
+      type: Boolean,
+      default: false,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
     },
   },
   { timestamps: true },
 );
 
-const Holiday = mongoose.model("Holiday", holidaySchema);
+holidaySchema.index({ date: 1, isActive: 1 });
+holidaySchema.index({ sourceAnnouncementId: 1, date: 1 }, { unique: false });
 
+const Holiday = mongoose.model("Holiday", holidaySchema);
 module.exports = Holiday;

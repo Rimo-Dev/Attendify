@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components */
 import Cookies from "js-cookie";
 import { createContext, useEffect, useState } from "react";
 import api from "../services/api";
@@ -30,6 +29,7 @@ export const AuthProvider = ({ children }) => {
     const res = await api.post("/auth/login", { email, password });
     Cookies.set("token", res.data.token, { expires: 30 });
     setUser(res.data);
+    return res.data;
   };
 
   const logout = () => {

@@ -1,6 +1,6 @@
 import { format } from "date-fns";
-import { CalendarDays, Download, LogIn, LogOut } from "lucide-react";
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { Download, Edit2, FileText, LogIn, LogOut, Trash2 } from "lucide-react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { AuthContext } from "../contexts/AuthContext";
 import api from "../services/api";
 
@@ -8,15 +8,24 @@ const Attendance = () => {
   const [attendanceLogs, setAttendanceLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedEmployee, setSelectedEmployee] = useState("");
+  const [showModal, setShowModal] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [formData, setFormData] = useState({
+    checkIn: "",
+    checkOut: "",
+    status: "Present",
+    lateDuration: 0,
+  });
   const [selectedDate, setSelectedDate] = useState("");
-  const dateInputRef = useRef(null);
+  const [showExportMenu, setShowExportMenu] = useState(false);
   const { user } = useContext(AuthContext);
+  const exportMenuRef = useRef(null);
+
   const isManager = user?.role === "Admin" || user?.role === "HR";
 
-  const fetchAttendance = useCallback(async () => {
+  const fetchAttendance = async () => {
     try {
-      const base = isManager ? "/attendance" : "/attendance/my";
-      const endpoint = selectedDate ? `${base}?date=${selectedDate}` : base;
+      const endpoint = isManager ? "/attendance" : "/attendance/my";
       const res = await api.get(endpoint);
       setAttendanceLogs(res.data);
     } catch (error) {
@@ -24,14 +33,25 @@ const Attendance = () => {
     } finally {
       setLoading(false);
     }
-  }, [isManager, selectedDate]);
+  };
 
   useEffect(() => {
-    const load = async () => {
-      await fetchAttendance();
+    fetchAttendance();
+  }, [isManager]);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (
+        exportMenuRef.current &&
+        !exportMenuRef.current.contains(event.target)
+      ) {
+        setShowExportMenu(false);
+      }
     };
-    if (user?.role) load();
-  }, [fetchAttendance, user?.role]);
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const handleCheckIn = async () => {
     try {
@@ -51,7 +71,30 @@ const Attendance = () => {
     }
   };
 
-  const downloadCSV = () => {
+  const openCsvInNewTab = (csvContent) => {
+    const newWindow = window.open("", "_blank", "noopener,noreferrer");
+
+    if (!newWindow) {
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute(
+        "download",
+        `attendance_export_${format(new Date(), "yyyyMMdd")}.csv`,
+      );
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return;
+    }
+
+    newWindow.document.title = "Attendance Export CSV";
+    newWindow.document.body.innerHTML = `<pre style="white-space: pre-wrap; word-break: break-word; font-family: monospace; padding: 16px;">${csvContent.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</pre>`;
+  };
+
+  const openCSV = () => {
     const headers = [
       "Date",
       "Employee",
@@ -73,16 +116,61 @@ const Attendance = () => {
       headers.join(","),
       ...rows.map((r) => r.join(",")),
     ].join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute(
-      "download",
-      `attendance_export_${format(new Date(), "yyyyMMdd")}.csv`,
-    );
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    openCsvInNewTab(csvContent);
+    setShowExportMenu(false);
+  };
+
+  const handleEdit = (log) => {
+    setFormData({
+      checkIn: log.checkIn
+        ? new Date(
+            new Date(log.checkIn).getTime() -
+              new Date().getTimezoneOffset() * 60000,
+          )
+            .toISOString()
+            .slice(0, 16)
+        : "",
+      checkOut: log.checkOut
+        ? new Date(
+            new Date(log.checkOut).getTime() -
+              new Date().getTimezoneOffset() * 60000,
+          )
+            .toISOString()
+            .slice(0, 16)
+        : "",
+      status: log.status,
+      lateDuration: log.lateDuration || 0,
+    });
+    setEditingId(log._id);
+    setShowModal(true);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const payload = { ...formData };
+      if (payload.checkIn === "") payload.checkIn = null;
+      if (payload.checkOut === "") payload.checkOut = null;
+      await api.put(`/attendance/${editingId}`, payload);
+      setShowModal(false);
+      setEditingId(null);
+      fetchAttendance();
+    } catch (error) {
+      alert(error.response?.data?.message || "Failed to update attendance");
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (
+      window.confirm("Are you sure you want to delete this attendance record?")
+    ) {
+      try {
+        await api.delete(`/attendance/${id}`);
+        fetchAttendance();
+      } catch (error) {
+        alert("Failed to delete attendance record");
+      }
+    }
   };
 
   const uniqueEmployees = Array.from(
@@ -96,9 +184,17 @@ const Attendance = () => {
       attendanceLogs.find((log) => log.employeeId?._id === id)?.employeeId,
   );
 
-  const filteredLogs = selectedEmployee
-    ? attendanceLogs.filter((log) => log.employeeId?._id === selectedEmployee)
-    : attendanceLogs;
+  const filteredLogs = attendanceLogs.filter((log) => {
+    let match = true;
+    if (selectedEmployee && log.employeeId?._id !== selectedEmployee)
+      match = false;
+    if (
+      selectedDate &&
+      format(new Date(log.date), "yyyy-MM-dd") !== selectedDate
+    )
+      match = false;
+    return match;
+  });
 
   if (loading) return <div>Loading attendance logs...</div>;
 
@@ -121,97 +217,136 @@ const Attendance = () => {
           </p>
         </div>
 
-        <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: "16px",
+            alignItems: "center",
+            flexWrap: "wrap",
+          }}
+        >
           {isManager && (
-            <select
-              className="input-field"
-              style={{
-                width: "auto",
-                margin: 0,
-                padding: "8px 16px",
-                height: "40px",
-              }}
-              value={selectedEmployee}
-              onChange={(e) => setSelectedEmployee(e.target.value)}
-            >
-              <option value="">All Employees</option>
-              {uniqueEmployees.map((emp) => (
-                <option key={emp._id} value={emp._id}>
-                  {emp.name}
-                </option>
-              ))}
-            </select>
+            <>
+              <input
+                type="date"
+                className="input-field"
+                style={{
+                  width: "auto",
+                  margin: 0,
+                  padding: "8px 16px",
+                  height: "40px",
+                }}
+                value={selectedDate}
+                onClick={(e) => e.target.showPicker && e.target.showPicker()}
+                onChange={(e) => setSelectedDate(e.target.value)}
+              />
+              <select
+                className="input-field"
+                style={{
+                  width: "auto",
+                  margin: 0,
+                  padding: "8px 16px",
+                  height: "40px",
+                }}
+                value={selectedEmployee}
+                onChange={(e) => setSelectedEmployee(e.target.value)}
+              >
+                <option value="">All Employees</option>
+                {uniqueEmployees.map((emp) => (
+                  <option key={emp._id} value={emp._id}>
+                    {emp.name}
+                  </option>
+                ))}
+              </select>
+              {(selectedEmployee || selectedDate) && (
+                <button
+                  onClick={() => {
+                    setSelectedEmployee("");
+                    setSelectedDate("");
+                  }}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: "var(--primary)",
+                    cursor: "pointer",
+                    fontSize: "0.9rem",
+                  }}
+                >
+                  Clear Filters
+                </button>
+              )}
+            </>
           )}
-
-          {/* Date picker with calendar icon — auto-filters on change */}
-          <div
-            style={{
-              position: "relative",
-              display: "inline-flex",
-              alignItems: "center",
-            }}
-          >
-            <CalendarDays
-              onClick={() => {
-                if (dateInputRef.current) {
-                  // try to open native date picker when available
-                  try {
-                    dateInputRef.current.showPicker?.();
-                  } catch (e) {
-                    // ignore
-                  }
-                  dateInputRef.current.focus();
-                }
-              }}
+          <div ref={exportMenuRef} style={{ position: "relative" }}>
+            <button
+              type="button"
+              onClick={() => setShowExportMenu((prev) => !prev)}
+              className="btn"
               style={{
-                position: "absolute",
-                left: 10,
-                color: "var(--text-muted)",
-                cursor: "pointer",
+                background: "rgba(59, 130, 246, 0.2)",
+                color: "var(--primary)",
+                padding: "10px 18px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
               }}
-            />
-            <input
-              ref={dateInputRef}
-              type="date"
-              className="input-field"
-              value={selectedDate}
-              readOnly
-              onFocus={() => {
-                if (dateInputRef.current) {
-                  try {
-                    dateInputRef.current.showPicker?.();
-                  } catch (e) {}
-                }
-              }}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              style={{ height: 40, paddingLeft: 36, cursor: "pointer" }}
-            />
+            >
+              <Download size={20} /> Export
+            </button>
+            {showExportMenu && (
+              <div
+                className="glass-panel animate-fade-in"
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  marginTop: "8px",
+                  padding: "8px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                  zIndex: 10,
+                  minWidth: "160px",
+                  background: "rgba(20, 20, 20, 0.95)",
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={openCSV}
+                  className="btn"
+                  style={{
+                    background: "transparent",
+                    color: "var(--text-color)",
+                    justifyContent: "flex-start",
+                    padding: "8px 12px",
+                    width: "100%",
+                  }}
+                >
+                  <FileText size={16} style={{ color: "var(--primary)" }} />{" "}
+                  Export as CSV
+                </button>
+                {/* PDF export removed per request */}
+              </div>
+            )}
           </div>
-
-          <button
-            onClick={downloadCSV}
-            className="btn"
-            style={{
-              background: "rgba(59, 130, 246, 0.2)",
-              color: "var(--primary)",
-            }}
-          >
-            <Download size={20} /> Export CSV
-          </button>
-          <button
-            onClick={handleCheckIn}
-            className="btn btn-primary"
-            style={{ background: "var(--success)" }}
-          >
-            <LogIn size={20} /> Check In Now
-          </button>
-          <button
-            onClick={handleCheckOut}
-            className="btn btn-primary"
-            style={{ background: "var(--danger)" }}
-          >
-            <LogOut size={20} /> Check Out
-          </button>
+          {!isManager && (
+            <>
+              <button
+                onClick={handleCheckIn}
+                className="btn btn-primary"
+                style={{ background: "var(--success)" }}
+              >
+                <LogIn size={20} /> Check In Now
+              </button>
+              <button
+                onClick={handleCheckOut}
+                className="btn btn-primary"
+                style={{ background: "var(--danger)" }}
+              >
+                <LogOut size={20} /> Check Out
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -225,6 +360,7 @@ const Attendance = () => {
               <th>Check Out</th>
               <th>Status</th>
               <th>Late By</th>
+              {isManager && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -256,11 +392,205 @@ const Attendance = () => {
                 >
                   {log.lateDuration > 0 ? `${log.lateDuration} mins` : "--"}
                 </td>
+                {isManager && (
+                  <td>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <button
+                        onClick={() => handleEdit(log)}
+                        style={{
+                          background: "none",
+                          color: "var(--primary)",
+                          border: "none",
+                          padding: "6px",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          backgroundColor: "rgba(139, 92, 246, 0.1)",
+                        }}
+                        title="Edit"
+                      >
+                        <Edit2 size={16} />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(log._id)}
+                        style={{
+                          background: "none",
+                          color: "var(--danger)",
+                          border: "none",
+                          padding: "6px",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          backgroundColor: "rgba(239, 68, 68, 0.1)",
+                        }}
+                        title="Delete"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* Edit Modal */}
+      {showModal && user.role === "Admin" && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: "rgba(0,0,0,0.5)",
+            zIndex: 1000,
+            overflowY: "auto",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "flex-start",
+          }}
+        >
+          <div
+            className="glass-panel animate-fade-in"
+            style={{
+              padding: "32px",
+              width: "100%",
+              maxWidth: "500px",
+              marginTop: "50px",
+              marginBottom: "50px",
+            }}
+          >
+            <h2 style={{ marginBottom: "24px" }}>Edit Attendance</h2>
+            <form
+              onSubmit={handleSubmit}
+              style={{ display: "flex", flexDirection: "column", gap: "16px" }}
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "16px",
+                }}
+              >
+                <div>
+                  <label
+                    style={{
+                      fontSize: "0.85rem",
+                      color: "var(--text-muted)",
+                      marginBottom: "8px",
+                      display: "block",
+                    }}
+                  >
+                    Check In
+                  </label>
+                  <input
+                    type="datetime-local"
+                    className="input-field"
+                    value={formData.checkIn}
+                    onChange={(e) =>
+                      setFormData({ ...formData, checkIn: e.target.value })
+                    }
+                  />
+                </div>
+                <div>
+                  <label
+                    style={{
+                      fontSize: "0.85rem",
+                      color: "var(--text-muted)",
+                      marginBottom: "8px",
+                      display: "block",
+                    }}
+                  >
+                    Check Out
+                  </label>
+                  <input
+                    type="datetime-local"
+                    className="input-field"
+                    value={formData.checkOut}
+                    onChange={(e) =>
+                      setFormData({ ...formData, checkOut: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "16px",
+                }}
+              >
+                <div>
+                  <label
+                    style={{
+                      fontSize: "0.85rem",
+                      color: "var(--text-muted)",
+                      marginBottom: "8px",
+                      display: "block",
+                    }}
+                  >
+                    Status
+                  </label>
+                  <select
+                    className="input-field"
+                    value={formData.status}
+                    onChange={(e) =>
+                      setFormData({ ...formData, status: e.target.value })
+                    }
+                  >
+                    <option value="Present">Present</option>
+                    <option value="Late">Late</option>
+                    <option value="Absent">Absent</option>
+                  </select>
+                </div>
+                <div>
+                  <label
+                    style={{
+                      fontSize: "0.85rem",
+                      color: "var(--text-muted)",
+                      marginBottom: "8px",
+                      display: "block",
+                    }}
+                  >
+                    Late By (mins)
+                  </label>
+                  <input
+                    type="number"
+                    className="input-field"
+                    value={formData.lateDuration}
+                    onChange={(e) =>
+                      setFormData({ ...formData, lateDuration: e.target.value })
+                    }
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: "12px", marginTop: "16px" }}>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  style={{ flex: 1 }}
+                >
+                  Save Changes
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => setShowModal(false)}
+                  style={{
+                    flex: 1,
+                    background: "rgba(255,255,255,0.1)",
+                    color: "white",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
