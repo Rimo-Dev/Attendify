@@ -75,6 +75,12 @@ const getEmployeeById = async (req, res) => {
 // @access  Private/Admin
 const createEmployee = async (req, res) => {
   try {
+    if (req.user.role !== "Admin") {
+      return res
+        .status(403)
+        .json({ message: "Only Admin can create employees" });
+    }
+
     const {
       name,
       email,
@@ -133,14 +139,15 @@ const createEmployee = async (req, res) => {
 // @access  Private/Admin
 const updateEmployee = async (req, res) => {
   try {
+    if (req.user.role !== "Admin") {
+      return res
+        .status(403)
+        .json({ message: "Only Admin can update employees" });
+    }
+
     const employee = await User.findById(req.params.id);
 
     if (employee) {
-      if (req.user.role === "HR" && employee.role === "Admin") {
-        return res
-          .status(403)
-          .json({ message: "HR cannot modify Admin users" });
-      }
       employee.name = req.body.name || employee.name;
       employee.email = req.body.email || employee.email;
       employee.role = req.body.role || employee.role;
@@ -204,14 +211,15 @@ const updateEmployee = async (req, res) => {
 // @access  Private/Admin
 const deleteEmployee = async (req, res) => {
   try {
+    if (req.user.role !== "Admin") {
+      return res
+        .status(403)
+        .json({ message: "Only Admin can delete employees" });
+    }
+
     const employee = await User.findById(req.params.id);
 
     if (employee) {
-      if (req.user.role === "HR" && employee.role === "Admin") {
-        return res
-          .status(403)
-          .json({ message: "HR cannot delete Admin users" });
-      }
       await User.deleteOne({ _id: employee._id });
       res.json({ message: "Employee removed" });
     } else {

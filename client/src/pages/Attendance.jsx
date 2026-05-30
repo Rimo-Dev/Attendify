@@ -1,6 +1,6 @@
 import { format } from "date-fns";
 import { Download, Edit2, FileText, LogIn, LogOut, Trash2 } from "lucide-react";
-import { useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import { AuthContext } from "../contexts/AuthContext";
 import api from "../services/api";
 
@@ -22,8 +22,10 @@ const Attendance = () => {
   const exportMenuRef = useRef(null);
 
   const isManager = user?.role === "Admin" || user?.role === "HR";
+  const canCheckOwnAttendance =
+    user?.role === "Employee" || user?.role === "HR";
 
-  const fetchAttendance = async () => {
+  const fetchAttendance = useCallback(async () => {
     try {
       const endpoint = isManager ? "/attendance" : "/attendance/my";
       const res = await api.get(endpoint);
@@ -33,10 +35,20 @@ const Attendance = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [isManager]);
 
   useEffect(() => {
-    fetchAttendance();
+    (async () => {
+      try {
+        const endpoint = isManager ? "/attendance" : "/attendance/my";
+        const res = await api.get(endpoint);
+        setAttendanceLogs(res.data);
+      } catch (error) {
+        console.error("Failed to fetch attendance", error);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, [isManager]);
 
   useEffect(() => {
@@ -57,8 +69,9 @@ const Attendance = () => {
     try {
       await api.post("/attendance/check-in");
       fetchAttendance();
-    } catch (error) {
-      alert(error.response?.data?.message || "Failed to check in");
+    } catch (err) {
+      console.error(err);
+      alert(err.response?.data?.message || "Failed to check in");
     }
   };
 
@@ -66,8 +79,9 @@ const Attendance = () => {
     try {
       await api.put("/attendance/check-out");
       fetchAttendance();
-    } catch (error) {
-      alert(error.response?.data?.message || "Failed to check out");
+    } catch (err) {
+      console.error(err);
+      alert(err.response?.data?.message || "Failed to check out");
     }
   };
 
@@ -167,7 +181,8 @@ const Attendance = () => {
       try {
         await api.delete(`/attendance/${id}`);
         fetchAttendance();
-      } catch (error) {
+      } catch (err) {
+        console.error(err);
         alert("Failed to delete attendance record");
       }
     }
@@ -329,7 +344,7 @@ const Attendance = () => {
               </div>
             )}
           </div>
-          {!isManager && (
+          {canCheckOwnAttendance && (
             <>
               <button
                 onClick={handleCheckIn}

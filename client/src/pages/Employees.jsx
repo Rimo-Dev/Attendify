@@ -24,7 +24,6 @@ const Employees = () => {
     joiningDate: format(new Date(), "yyyy-MM-dd"),
   });
   const [performanceData, setPerformanceData] = useState(null);
-  const [loadingPerformance, setLoadingPerformance] = useState(false);
   const { user } = useContext(AuthContext);
   const navigate = useNavigate();
 
@@ -68,7 +67,16 @@ const Employees = () => {
   };
 
   useEffect(() => {
-    fetchEmployees();
+    (async () => {
+      try {
+        const res = await api.get("/employees");
+        setEmployees(res.data);
+      } catch (error) {
+        console.error("Failed to fetch employees", error);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
   const handleSubmit = async (e) => {
@@ -138,23 +146,24 @@ const Employees = () => {
       try {
         await api.delete(`/employees/${id}`);
         fetchEmployees();
-      } catch (error) {
+      } catch (err) {
+        console.error(err);
         alert("Failed to delete");
       }
     }
   };
 
   const handleViewPerformance = async (empId) => {
-    setLoadingPerformance(true);
     setPerformanceData({ loading: true });
     try {
       const res = await api.get(`/reports/employee/${empId}`);
       setPerformanceData(res.data);
-    } catch (error) {
+    } catch (err) {
+      console.error(err);
       alert("Failed to load performance data");
       setPerformanceData(null);
     } finally {
-      setLoadingPerformance(false);
+      // rely on performanceData.loading and reset above
     }
   };
 
@@ -261,30 +270,34 @@ const Employees = () => {
                         >
                           <TrendingUp size={18} />
                         </button>
-                        <button
-                          onClick={() => handleEdit(emp)}
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "var(--primary)",
-                            cursor: "pointer",
-                          }}
-                          title="Edit Employee"
-                        >
-                          <Edit2 size={18} />
-                        </button>
-                        <button
-                          onClick={() => handleDelete(emp._id)}
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "var(--danger)",
-                            cursor: "pointer",
-                          }}
-                          title="Delete Employee"
-                        >
-                          <Trash2 size={18} />
-                        </button>
+                        {user?.role === "Admin" && (
+                          <>
+                            <button
+                              onClick={() => handleEdit(emp)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                color: "var(--primary)",
+                                cursor: "pointer",
+                              }}
+                              title="Edit Employee"
+                            >
+                              <Edit2 size={18} />
+                            </button>
+                            <button
+                              onClick={() => handleDelete(emp._id)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                color: "var(--danger)",
+                                cursor: "pointer",
+                              }}
+                              title="Delete Employee"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </>
+                        )}
                       </div>
                     )}
                 </td>

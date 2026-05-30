@@ -1,15 +1,14 @@
 import jsPDF from "jspdf";
 import "jspdf-autotable";
 import { ArrowLeft, Download } from "lucide-react";
-import { useContext, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { AuthContext } from "../contexts/AuthContext";
+
 import api from "../services/api";
 
 const SalaryDetails = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user } = useContext(AuthContext);
   const [salaryData, setSalaryData] = useState(null);
   const [loading, setLoading] = useState(true);
 

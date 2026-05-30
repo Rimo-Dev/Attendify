@@ -20,6 +20,21 @@ const getAttendanceBlockedMessage = async (date) => {
   return null;
 };
 
+const isAfterShiftEnd = (now, shiftEndTime) => {
+  if (!shiftEndTime) {
+    return false;
+  }
+
+  const [endHour, endMin] = String(shiftEndTime).split(":").map(Number);
+  if (Number.isNaN(endHour) || Number.isNaN(endMin)) {
+    return false;
+  }
+
+  const shiftEnd = new Date(now);
+  shiftEnd.setHours(endHour, endMin, 0, 0);
+  return now > shiftEnd;
+};
+
 // @desc    Check In
 // @route   POST /api/attendance/check-in
 // @access  Private
@@ -37,6 +52,12 @@ const checkIn = async (req, res) => {
     const blockedMessage = await getAttendanceBlockedMessage(today);
     if (blockedMessage) {
       return res.status(403).json({ message: blockedMessage });
+    }
+
+    if (isAfterShiftEnd(now, req.user.shiftEndTime)) {
+      return res.status(403).json({
+        message: "Attendance is not allowed after office hours end",
+      });
     }
 
     // Check if already checked in today
